@@ -65,7 +65,13 @@ def study(tmp_path, model):
         "images": [{"id": row["id"]} for row in rows],
         "categories": [{"id": 17, "name": "cat"}],
         "annotations": [
-            {"id": i, "image_id": row["id"], "category_id": 17}
+            {
+                "id": i,
+                "image_id": row["id"],
+                "category_id": 17,
+                "bbox": [3, 2, 7, 5],
+                "segmentation": [[3, 2, 10, 2, 10, 7, 3, 7]],
+            }
             for i, row in enumerate(rows)
         ],
     }
@@ -110,7 +116,12 @@ def study(tmp_path, model):
                 mask[None],
                 np.array([[3, 2, 10, 7]], np.float32),
                 np.array([0.8], np.float32),
-                {"legacy_fallback": False, "inventory": ["cat"]},
+                {
+                    "legacy_fallback": False,
+                    "inventory": ["cat"],
+                    "proposed_labels": ["cat"],
+                    "sam_predicted_iou": [0.8],
+                },
             ),
             {"image": row["image_id"]},
             True,
@@ -170,6 +181,39 @@ def test_cpu_report_keeps_incomplete_and_failed_outputs_visible(tmp_path):
     assert report["expected_outputs"] == 8 and report["completed_outputs"] == 0
     assert report["metadata"]["complete"] is False
     assert len(report["failures"]) == 1
+
+
+def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
+    study, monkeypatch
+):
+    from experiments.tas_v7.study_diagnostics import run_diagnostics
+
+    run, rows = study
+    monkeypatch.setattr(run, "rows", lambda cohort: rows)
+    calls = []
+
+    def sam_rerun(image, *, inventory_override, boxes_override):
+        calls.append(np.array(boxes_override, copy=True))
+        mask = np.zeros((image.height, image.width), bool)
+        mask[1:8, 2:11] = True
+        return PerceptionResult(
+            mask, mask[None], boxes_override, np.ones(1), {"sam_predicted_iou": [0.91]}
+        )
+
+    run.perception = SimpleNamespace(run=sam_rerun, close=lambda: None)
+    run_diagnostics(run, method_by_id("F4"))
+    assert len(calls) == len(rows)
+    expected = {"D-PRED": [0.8], "D-MASK": [None], "D-BOX": [0.91], "D-MISS": []}
+    for variant, qualities in expected.items():
+        saved = next(run.persistent_run.glob(f"diagnostics-{variant}-*/captions.jsonl"))
+        records = [json.loads(line) for line in saved.read_text().splitlines()]
+        assert len(records) == len(rows) * 3
+        for record in records:
+            metadata = record["perception_metadata"]
+            assert metadata["sam_predicted_iou"] == qualities
+            if variant == "D-MISS":
+                assert metadata["proposed_labels"] == [] and metadata["mask_empty"]
+    run.close()
 
 
 def test_budget_is_a_resumable_stop(study):

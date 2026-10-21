@@ -7,18 +7,20 @@ a second implementation of the model or fusion rules.
 
 ## Start in Colab
 
-1. Make the pinned experiment commit available through your chosen Git remote,
-   or copy the provided private `tas-v7-source.bundle` to
-   `MyDrive/TAS-Shared/code/tas-v7-source.bundle`. A GitHub branch in a public
-   repository is public too; a local branch/bundle does not publish the research.
-2. Upload `notebooks/TAS_v7_Colab.ipynb`. Keep the same persistent root in this
+1. Upload only `notebooks/TAS_v7_Colab.ipynb`. Its generated source cell contains
+   a compressed snapshot of the private experiment commit. It clones the fixed
+   public baseline and automatically verifies/materializes the private Python
+   modules. No separate file, private GitHub setup or research push is needed.
+   Keep the notebook private because it carries experimental source.
+2. Keep the same persistent root in this
    and subsequent notebooks. Check that Drive has at least **25 GB free** for
    the roughly 17–18 GB checkpoints plus data, masks and results. Large studies
    need additional room. Colab compute subscriptions do not imply extra Drive
    storage.
 3. Select a **CPU** runtime and **Run all**. Approve the normal Drive mount.
-   This creates the isolated environment, downloads/verifies model files and
-   data, freezes the cohorts, downloads NLP resources, and runs preflight tests.
+   This creates the isolated environment, prepares the small NLP resources and
+   runs preflight before large downloads. It then downloads/verifies model files
+   and data and freezes the cohorts.
    No inference model is loaded to download its weights.
 4. Select **A100 80 GB**, then **Run all** again. GPU setup validates CUDA,
    SDPA and torchvision NMS before copying/loading model weights. The notebook
@@ -131,6 +133,7 @@ independent review; the code does not invent a quality score.
 
 ```text
 TAS-Shared/
+  code/                   # verified private source snapshot and file manifest
   assets/                 # fixed model files, revisions, hashes and receipts
   data/coco/              # image bytes, source annotations, locked cohorts
   data/pope/              # official manifests used for overlap exclusion
@@ -182,8 +185,10 @@ python -m experiments.tas_v7.cli --config config.json --phase plan
 python tools/build_colab_notebook.py --commit <implementation-commit>
 ```
 
-The Python module sources are the editable implementation. Regenerate the thin
-notebook after selecting the implementation commit. To deliver privately, create
-a full Git bundle containing that commit and its history and put it at the notebook's
-configured Drive path. To deliver through GitHub, publish the branch only to the
-remote/visibility you intend; nothing in the notebook pushes code automatically.
+The Python module sources on the local experiment branch are the editable
+implementation. Commit and test them, then generate the notebook from that exact
+commit. The notebook carries generated transport data, not another manually
+maintained scientific implementation. It saves the source archive and its hashes
+privately on Drive for reproducibility. Each file is checked before installation;
+no file in the pinned public baseline may be replaced. Code publication and
+promotion to main remain separate decisions; the notebook never pushes code.

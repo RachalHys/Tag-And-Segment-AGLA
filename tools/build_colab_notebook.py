@@ -3,13 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 import subprocess
 import textwrap
 
+if __package__:
+    from .notebook_delivery import (
+        BASE_COMMIT,
+        package_from_commit,
+        restore_source_package,
+    )
+else:
+    from notebook_delivery import (
+        BASE_COMMIT,
+        package_from_commit,
+        restore_source_package,
+    )
 
-def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.git"):
+
+def build(
+    commit,
+    repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.git",
+    *,
+    source_package,
+):
+    if (
+        source_package["source_commit"] != commit
+        or source_package["base_commit"] != BASE_COMMIT
+    ):
+        raise ValueError("Notebook and private source identities differ.")
     cells = []
 
     def markdown(source):
@@ -21,12 +45,12 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
             }
         )
 
-    def code(source):
+    def code(source, *, hidden=False):
         cells.append(
             {
                 "cell_type": "code",
                 "execution_count": None,
-                "metadata": {},
+                "metadata": {"cellView": "form"} if hidden else {},
                 "outputs": [],
                 "source": textwrap.dedent(source).strip() + "\n",
             }
@@ -41,11 +65,12 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
     folder across sessions and future notebooks. CPU/GPU environments are
     recreated locally; the notebook kernel is left intact.
 
-    The notebook imports versioned Python from the experiment branch. For
-    unpublished/private work, put the supplied `tas-v7-source.bundle` in the
-    Drive path below; it replaces the GitHub transport without changing code.
-    Otherwise make this exact experiment commit available at `REPO_URL` first.
-    No research code or results are uploaded to GitHub by this notebook.
+    Bring **only this notebook**. It clones the fixed public baseline, verifies
+    and restores its packaged private Python modules, then imports them normally.
+    The editable implementation remains in the local experiment branch; the
+    compressed package is generated from its exact commit. No separate source
+    upload, unpublished GitHub branch or research publication is required.
+    The code snapshot is also saved privately to Drive with its hashes.
 
     Automatic flow: blocking P0 audit → 30-image smoke → 240-image screen →
     predeclared shortlist → confirmation (3 seeds + greedy) → controls → P0-D.
@@ -59,9 +84,8 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
     code(f"""
     # Edit these settings once. Reuse PERSISTENT_ROOT in future idea notebooks.
     REPO_URL = {repo_url!r}
-    REPO_BRANCH = "experiment/tas-v7-colab"
-    REPO_COMMIT = {commit!r}
-    PRIVATE_BUNDLE_PATH = "/content/drive/MyDrive/TAS-Shared/code/tas-v7-source.bundle"
+    BASELINE_COMMIT = {BASE_COMMIT!r}
+    RESEARCH_COMMIT = {commit!r}
     PERSISTENT_ROOT = "/content/drive/MyDrive/TAS-Shared"
     LOCAL_ROOT = "/content/tas-v7-work"
     PHASE = "auto"             # auto / prepare / run / score / check
@@ -83,13 +107,22 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
     """)
+    code(
+        "# @title Versioned private source package — generated, do not edit\n"
+        + "SOURCE_PACKAGE = "
+        + repr(source_package)
+        + "\n\n"
+        + inspect.getsource(restore_source_package),
+        hidden=True,
+    )
     markdown("""
     ## Connect storage and restore the exact code
 
     Drive authorization may prompt once per runtime. No credentials are saved
-    in configuration or outputs. With private delivery, copying the provided
-    Git bundle to `PRIVATE_BUNDLE_PATH` is a one-time setup. The same bundle and
-    model/data cache work in CPU and GPU sessions.
+    in configuration or outputs. Source restoration is automatic and verifies
+    both the archive and every file before installation. It cannot replace any
+    file from the frozen public baseline. Keep this notebook private because it
+    carries the experimental source. The same caches work in CPU/GPU sessions.
     """)
     code("""
     import os, sys, json, subprocess, pathlib, shutil, time
@@ -99,21 +132,21 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
     persistent = pathlib.Path(PERSISTENT_ROOT)
     persistent.mkdir(parents=True, exist_ok=True)
     checkout = pathlib.Path("/content/tas-v7-checkout")
-    if not (checkout / ".git").exists():
-        source = PRIVATE_BUNDLE_PATH if pathlib.Path(PRIVATE_BUNDLE_PATH).is_file() else REPO_URL
-        subprocess.run(["git", "clone", "--no-checkout", source, str(checkout)], check=True)
-    exists = subprocess.run(["git", "cat-file", "-e", REPO_COMMIT + "^{commit}"], cwd=checkout, capture_output=True)
-    if exists.returncode:
-        # Fetch only code. Missing/private commit fails here before model/setup work.
-        fetched = subprocess.run(["git", "fetch", "origin", REPO_BRANCH], cwd=checkout, capture_output=True, text=True)
-        if fetched.returncode:
-            raise RuntimeError("The pinned experiment code is unavailable. Restore the private Git bundle at PRIVATE_BUNDLE_PATH, or configure its authorized remote. No models were loaded.")
-    subprocess.run(["git", "checkout", "--detach", REPO_COMMIT], cwd=checkout, check=True)
-    actual_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
-    assert actual_commit == REPO_COMMIT, (actual_commit, REPO_COMMIT)
+    if (SOURCE_PACKAGE["base_commit"], SOURCE_PACKAGE["source_commit"]) != (BASELINE_COMMIT, RESEARCH_COMMIT):
+        raise ValueError("Regenerate the notebook to change its fixed code versions.")
+    source_receipt = restore_source_package(SOURCE_PACKAGE, checkout, persistent, REPO_URL)
+    actual_commit = source_receipt["source_commit"]
     os.chdir(checkout)
-    sys.path.insert(0, str(checkout))
-    print("Research source:", actual_commit)
+    if str(checkout) not in sys.path:
+        sys.path.insert(0, str(checkout))
+    # A new idea notebook may reuse this VM with different private modules.
+    for module_name in list(sys.modules):
+        if module_name == "tas_runtime" or module_name.startswith("tas_runtime."):
+            del sys.modules[module_name]
+    import importlib
+    importlib.invalidate_caches()
+    print("Public baseline:", BASELINE_COMMIT)
+    print("Private Python source:", actual_commit, "| verified files:", len(source_receipt["files"]))
     """)
     markdown("""
     ## Isolated, pinned environment
@@ -180,8 +213,10 @@ def build(commit, repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.gi
     code("""
     phase_started = time.perf_counter()
     if effective_phase == "prepare":
-        run_phase("prepare")
+        # Small NLP assets enable the offline scientific fixtures first.
+        subprocess.run([str(python), "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp")], cwd=checkout, env=env, check=True)
         run_phase("check")
+        run_phase("prepare")
         run_phase("score")
         display(Markdown("**CPU preparation complete.** Files are persistent. Switch to the A100 runtime and Run all again."))
     elif effective_phase == "run":
@@ -252,7 +287,7 @@ def main():
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
         ).strip()
     )
-    notebook = build(commit)
+    notebook = build(commit, source_package=package_from_commit(root, commit))
     path = root / args.output
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

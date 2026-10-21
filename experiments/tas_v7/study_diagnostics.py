@@ -164,7 +164,7 @@ def run_diagnostics(study, finalist):
                 "diagnostic": variant,
                 "annotations_sha256": sha256_file(annotations_path),
                 "matches": matches,
-                "version": "same-instance-provisional-v1",
+                "version": "same-instance-provisional-v2",
             }
             value = study.cache.get(key)
             if value is not None:
@@ -187,6 +187,12 @@ def run_diagnostics(study, finalist):
                     )
                     if changed_evidence:
                         instances = np.stack([item.mask for item in changed_evidence])
+                    qualities = list(
+                        metadata.get("sam_predicted_iou", [None] * len(instances))
+                    )
+                    for match in matches:
+                        qualities[match["prediction_index"]] = None
+                    metadata["sam_predicted_iou"] = qualities
                     metadata["intervention_details"] = details
                 elif variant == "D-BOX" and matches:
                     changed_evidence, details = replace_same_instance_evidence(
@@ -209,6 +215,7 @@ def run_diagnostics(study, finalist):
                         boxes_override=boxes,
                     )
                     instances = rerun.instances
+                    metadata["sam_predicted_iou"] = rerun.metadata["sam_predicted_iou"]
                     metadata["sam_rerun_on_modified_boxes"] = True
                 elif variant == "D-MISS" and matches:
                     removed = matches[0]
@@ -231,6 +238,12 @@ def run_diagnostics(study, finalist):
                             for i, label in enumerate(metadata["proposed_labels"])
                             if i != removed["prediction_index"]
                         ]
+                    if "sam_predicted_iou" in metadata:
+                        metadata["sam_predicted_iou"] = [
+                            quality
+                            for i, quality in enumerate(metadata["sam_predicted_iou"])
+                            if i != removed["prediction_index"]
+                        ]
                     metadata["removed_prediction_index"] = removed["prediction_index"]
                     metadata["verified_present_annotation_id"] = removed[
                         "annotation_id"
@@ -239,6 +252,11 @@ def run_diagnostics(study, finalist):
                     instances.any(axis=0)
                     if len(instances)
                     else np.zeros_like(prediction.mask)
+                )
+                metadata.update(
+                    mask_fraction=float(mask.mean()),
+                    mask_empty=not bool(mask.any()),
+                    mask_full=bool(mask.all()),
                 )
                 changed = PerceptionResult(mask, instances, boxes, scores, metadata)
                 study.cache.put(key, changed.arrays(), changed.metadata)
