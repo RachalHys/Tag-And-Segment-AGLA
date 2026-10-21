@@ -133,9 +133,7 @@ def prepare(config: StudyConfig, *, models=True, cohorts=("A", "B", "C", "D")):
         "exclusions": sorted(set(excluded)),
         "training_overlap": "unknown; split names do not establish unseen training data",
     }
-    identity = canonical_hash(
-        {key: value for key, value in output.items() if key != "assets"}
-    )
+    identity = canonical_hash(output)
     atomic_json(root / "preparations" / f"{identity}.json", output)
     # A convenience pointer only; the fully resolved content/identity is checked
     # again in each study and saved with its outputs.
