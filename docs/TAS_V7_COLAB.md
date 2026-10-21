@@ -24,6 +24,7 @@ require regenerating the latest unpublished output chunk.
 `AUTO_SHUTDOWN=True` flushes Drive and releases the runtime at the final cell,
 including after a planned budget stop. This uses Colab's official
 [`runtime.unassign()`](https://github.com/googlecolab/colabtools/blob/main/google/colab/runtime.py).
+Setup and execution errors also flush Drive and request release before propagating.
 
 ## Experiment flow
 

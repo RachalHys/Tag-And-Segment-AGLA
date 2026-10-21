@@ -45,14 +45,25 @@ def build(
             }
         )
 
-    def code(source, *, hidden=False):
+    def code(source, *, hidden=False, release_on_error=False):
+        source = textwrap.dedent(source).strip() + "\n"
+        if release_on_error:
+            source = (
+                "try:\n"
+                + textwrap.indent(source, "    ")
+                + "except BaseException:\n"
+                + "    import traceback\n"
+                + "    traceback.print_exc()\n"
+                + "    release_runtime()\n"
+                + "    raise\n"
+            )
         cells.append(
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {"cellView": "form"} if hidden else {},
                 "outputs": [],
-                "source": textwrap.dedent(source).strip() + "\n",
+                "source": source,
             }
         )
 
@@ -107,6 +118,13 @@ def build(
     ATTENTION_BACKENDS = ["eager", "sdpa"]
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
+
+    def release_runtime():
+        if AUTO_SHUTDOWN:
+            from google.colab import drive, runtime
+            print("Saving pending Drive writes, then releasing the Colab runtime.")
+            drive.flush_and_unmount()
+            runtime.unassign()
     """)
     code(
         "# @title Versioned private source package — generated, do not edit\n"
@@ -125,7 +143,8 @@ def build(
     file from the frozen public baseline. Keep this notebook private because it
     carries the experimental source. The same caches work in CPU/GPU sessions.
     """)
-    code("""
+    code(
+        """
     import os, sys, json, subprocess, pathlib, shutil, time
     from IPython.display import display, Markdown, HTML
     from google.colab import drive
@@ -148,7 +167,9 @@ def build(
     importlib.invalidate_caches()
     print("Public baseline:", BASELINE_COMMIT)
     print("Private Python source:", actual_commit, "| verified files:", len(source_receipt["files"]))
-    """)
+    """,
+        release_on_error=True,
+    )
     markdown("""
     ## Isolated, pinned environment
 
@@ -157,7 +178,8 @@ def build(
     preserved. No notebook-kernel restart, system Torch replacement or CUDA
     extension compilation is needed. GPU mode validates its actual CUDA path.
     """)
-    code("""
+    code(
+        """
     query = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], capture_output=True, text=True) if shutil.which("nvidia-smi") else None
     has_gpu = query is not None and query.returncode == 0 and bool(query.stdout.strip())
     effective_phase = ("run" if has_gpu else "prepare") if PHASE == "auto" else PHASE
@@ -197,7 +219,9 @@ def build(
     if DATASET == "amber":
         subprocess.run([str(python), "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp"), "--amber"], cwd=checkout, env=env, check=True)
     run_phase("plan")
-    """)
+    """,
+        release_on_error=True,
+    )
     markdown("""
     ## Prepare or run the study
 
@@ -211,7 +235,8 @@ def build(
     rejected optimization is recorded; baseline failures block larger runs.
     Results use immutable chunks and perception caches use shards on Drive.
     """)
-    code("""
+    code(
+        """
     phase_started = time.perf_counter()
     if effective_phase == "prepare":
         # Small NLP assets enable the offline scientific fixtures first.
@@ -230,7 +255,9 @@ def build(
     else:
         raise ValueError("Unknown phase")
     print("Session phase seconds:", round(time.perf_counter() - phase_started, 1))
-    """)
+    """,
+        release_on_error=True,
+    )
     markdown("""
     ## Inspect saved reports
 
@@ -240,7 +267,8 @@ def build(
     captions, failures, coverage, length, timings and uncertainty together.
     CPU scoring/report regeneration is available with PHASE="score".
     """)
-    code("""
+    code(
+        """
     import csv, html
     from IPython.display import Image as DisplayImage
     runs_root = persistent / "runs"
@@ -259,20 +287,19 @@ def build(
             display(HTML(table))
     print("Persistent artifacts:", persistent)
     print("Reuse this folder for later sessions/new idea notebooks. Do not delete frozen manifests or rewrite completed runs.")
-    """)
+    """,
+        release_on_error=True,
+    )
     markdown("""
     ## Release the session
 
     With `AUTO_SHUTDOWN=True`, the final cell flushes Drive writes and releases
-    the runtime after preparation, evaluation or a planned budget stop. Reports
-    remain on Drive. Set it to False only when keeping the runtime for inspection.
+    the runtime after preparation, evaluation or a planned budget stop. Errors
+    also invoke this cleanup before propagating. Reports remain on Drive.
+    Set it to False only when keeping the runtime for inspection.
     """)
     code("""
-    if AUTO_SHUTDOWN:
-        from google.colab import runtime
-        print("Saving pending Drive writes, then releasing the Colab runtime.")
-        drive.flush_and_unmount()
-        runtime.unassign()
+    release_runtime()
     """)
     return {
         "cells": cells,

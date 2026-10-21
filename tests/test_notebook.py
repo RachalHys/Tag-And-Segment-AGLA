@@ -1,5 +1,6 @@
 import ast
 import nbformat
+import pytest
 from tools.build_colab_notebook import build
 from tools.notebook_delivery import BASE_COMMIT
 
@@ -52,25 +53,56 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["AUTO_SHUTDOWN"] is True
 
 
-def test_shutdown_flushes_drive_before_releasing_runtime(monkeypatch):
+@pytest.fixture
+def shutdown_notebook(monkeypatch):
     import sys
     from types import ModuleType, SimpleNamespace
 
     notebook = build("c" * 40, source_package=fixture_package("c" * 40))
-    cell = notebook["cells"][-1]["source"]
     calls = []
     colab = ModuleType("google.colab")
+    colab.drive = SimpleNamespace(flush_and_unmount=lambda: calls.append("flush"))
     colab.runtime = SimpleNamespace(unassign=lambda: calls.append("release"))
     monkeypatch.setitem(sys.modules, "google.colab", colab)
-    namespace = {
-        "AUTO_SHUTDOWN": True,
-        "drive": SimpleNamespace(flush_and_unmount=lambda: calls.append("flush")),
-    }
+    namespace = {}
+    parameters = next(
+        cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code"
+    )
+    exec(compile(parameters, "parameters", "exec"), namespace)
+    return notebook, namespace, calls
+
+
+def test_shutdown_flushes_drive_before_releasing_runtime(shutdown_notebook):
+    notebook, namespace, calls = shutdown_notebook
+    cell = notebook["cells"][-1]["source"]
     exec(compile(cell, "shutdown-cell", "exec"), namespace)
     assert calls == ["flush", "release"]
     calls.clear()
-    exec(
-        compile(cell, "shutdown-disabled", "exec"),
-        {**namespace, "AUTO_SHUTDOWN": False},
-    )
+    namespace["AUTO_SHUTDOWN"] = False
+    exec(compile(cell, "shutdown-disabled", "exec"), namespace)
     assert calls == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_failed_preflight_releases_runtime_and_preserves_failure(
+    shutdown_notebook, enabled
+):
+    import time
+
+    notebook, namespace, calls = shutdown_notebook
+    cell = next(
+        cell["source"]
+        for cell in notebook["cells"]
+        if "phase_started =" in cell["source"]
+    )
+
+    def fail(phase):
+        calls.append(phase)
+        raise RuntimeError("preflight fixture failed")
+
+    namespace.update(
+        AUTO_SHUTDOWN=enabled, effective_phase="run", run_phase=fail, time=time
+    )
+    with pytest.raises(RuntimeError, match="preflight fixture failed"):
+        exec(compile(cell, "failed-preflight-cell", "exec"), namespace)
+    assert calls == (["check", "flush", "release"] if enabled else ["check"])

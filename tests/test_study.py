@@ -213,6 +213,18 @@ def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
             assert metadata["sam_predicted_iou"] == qualities
             if variant == "D-MISS":
                 assert metadata["proposed_labels"] == [] and metadata["mask_empty"]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Completed diagnostic inference must be reused")
+
+    monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
+    run_diagnostics(run, method_by_id("F4"))
+    assert len(calls) == len(rows)
+    (run.persistent_run / "diagnostics/fixed-prefix-influence.jsonl").write_text(
+        "corrupted"
+    )
+    with pytest.raises(AssertionError, match="Completed diagnostic inference"):
+        run_diagnostics(run, method_by_id("F4"))
     run.close()
 
 
