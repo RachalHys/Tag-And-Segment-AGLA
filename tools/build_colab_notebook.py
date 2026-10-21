@@ -93,6 +93,7 @@ def build(
     MAX_SESSION_MINUTES = 180  # planned stop; run again to resume without changing the experiment
     SEEDS = [0, 1, 2]
     REQUIRE_A100_80GB = True
+    AUTO_SHUTDOWN = True       # flush Drive, then release runtime after this session's work
     RUN_CONFIRMATION = True
     RUN_CONTROLS = True
     RUN_DIAGNOSTICS = True
@@ -258,6 +259,20 @@ def build(
             display(HTML(table))
     print("Persistent artifacts:", persistent)
     print("Reuse this folder for later sessions/new idea notebooks. Do not delete frozen manifests or rewrite completed runs.")
+    """)
+    markdown("""
+    ## Release the session
+
+    With `AUTO_SHUTDOWN=True`, the final cell flushes Drive writes and releases
+    the runtime after preparation, evaluation or a planned budget stop. Reports
+    remain on Drive. Set it to False only when keeping the runtime for inspection.
+    """)
+    code("""
+    if AUTO_SHUTDOWN:
+        from google.colab import runtime
+        print("Saving pending Drive writes, then releasing the Colab runtime.")
+        drive.flush_and_unmount()
+        runtime.unassign()
     """)
     return {
         "cells": cells,

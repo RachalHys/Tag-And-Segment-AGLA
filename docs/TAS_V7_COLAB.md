@@ -1,194 +1,80 @@
-# Running the TAS v7 experiment
+# TAS v7 research notebook
 
-This implementation is on `experiment/tas-v7-colab`. The original CLI runners,
-model definitions, legacy sampler, checkpoint precision and perception questions
-remain available. The notebook imports the new Python modules; it does not hold
-a second implementation of the model or fusion rules.
+The editable experiment code is on `experiment/tas-v7-colab`. The notebook is a
+launcher with a generated, compressed copy of those Python modules. It clones
+the fixed public baseline and restores the private modules automatically.
+No separate upload or public research push is needed. Keep the notebook private.
 
-## Start in Colab
+## Run in Colab
 
-1. Upload only `notebooks/TAS_v7_Colab.ipynb`. Its generated source cell contains
-   a compressed snapshot of the private experiment commit. It clones the fixed
-   public baseline and automatically verifies/materializes the private Python
-   modules. No separate file, private GitHub setup or research push is needed.
-   Keep the notebook private because it carries experimental source.
-2. Keep the same persistent root in this
-   and subsequent notebooks. Check that Drive has at least **25 GB free** for
-   the roughly 17–18 GB checkpoints plus data, masks and results. Large studies
-   need additional room. Colab compute subscriptions do not imply extra Drive
-   storage.
-3. Select a **CPU** runtime and **Run all**. Approve the normal Drive mount.
-   This creates the isolated environment, prepares the small NLP resources and
-   runs preflight before large downloads. It then downloads/verifies model files
-   and data and freezes the cohorts.
-   No inference model is loaded to download its weights.
-4. Select **A100 80 GB**, then **Run all** again. GPU setup validates CUDA,
-   SDPA and torchvision NMS before copying/loading model weights. The notebook
-   restores local files and starts one LLaVA instance for the study.
-5. If the session ends or its configured budget is reached, use **Run all** in
-   the next GPU session. Completed image/method/seed records are reused. A CPU
-   session can regenerate reports with `PHASE="score"`.
+1. Upload `notebooks/TAS_v7_Colab.ipynb` and select a **CPU** runtime.
+2. Press **Run all** and authorize Drive. Preflight runs before the large
+   downloads. Models, selected data and NLP resources are saved to
+   `MyDrive/TAS-Shared`.
+3. Select **A100 80 GB**, then **Run all** again. The notebook installs the GPU
+   environment, restores files locally, loads one LLaVA runtime and runs P0.
+4. Run again after a session ends. Completed results and perception caches are
+   reused. Keep the same persistent root in future idea notebooks.
 
-The default run budget is three hours per study subprocess; change it to match
-the session you intend to use. A budget stop is not a failed image. Hard runtime
-termination may lose the most recent, not-yet-published group of outputs; their
-per-record RNG streams make them reproducible on retry under the same kernels.
-No claim is made that the full study fits into one session.
+Allow at least **25 GB free Drive space** for the roughly 17–18 GB checkpoints
+plus data and results. Larger runs need more. The default study budget is three
+hours per subprocess; unfinished work resumes next session. A hard VM stop may
+require regenerating the latest unpublished output chunk.
 
-Colab's CPU and GPU allocations are treated as different VMs. Python environments
-are rebuilt locally; model/data/result files are restored from Drive. Working
-inference reads local disk rather than many small Drive reads. These choices
-follow the [Colab runtime/storage guidance](https://research.google.com/colaboratory/faq.html).
+`AUTO_SHUTDOWN=True` flushes Drive and releases the runtime at the final cell,
+including after a planned budget stop. This uses Colab's official
+[`runtime.unassign()`](https://github.com/googlecolab/colabtools/blob/main/google/colab/runtime.py).
 
-## Environment compatibility
+## Experiment flow
 
-Do not install `local_requirements.txt` or `kaggle_requirements.txt` into the
-notebook kernel for this workflow. `tas_runtime.bootstrap` creates a managed
-**Python 3.10.16** subprocess environment, leaving Colab's changing kernel alone.
-It installs matched **Torch 2.4.1 / torchvision 0.19.1** CPU or CUDA 12.1 wheels,
-Transformers 4.35.2, NumPy 1.26.4 and the declared profiles in `requirements/`.
-The exact resolved package versions are recorded. OpenAI CLIP/MobileSAM source
-revisions are fixed; CLIP builds with pinned setuptools, not a newer incompatible
-`pkg_resources`-free build environment.
+Blocking P0 -> smoke (30 images, 14 methods) -> screen (240, one seed) -> at most
+two finalists -> confirmation (300, three seeds plus greedy) -> development
+controls -> P0-D diagnostics (75 images). This follows the owner's later override
+of the original smoke review pause. Final remainder is opt-in. P3/P4/P5, FG-G,
+hidden interventions and a second backbone are deferred.
 
-The [official PyTorch wheel matrix](https://pytorch.org/get-started/previous-versions/)
-documents the matched versions. [uv managed Python](https://docs.astral.sh/uv/concepts/python-versions/)
-avoids depending on the Colab kernel's Python version. CUDA 12.x requires a
-compatible driver; [newer NVIDIA drivers retain backward compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
-The GPU bootstrap exercises actual FP16 SDPA and CUDA NMS, so a mismatched CUDA
-stack fails before a large model is loaded. No CUDA extension is compiled.
+Native E0/E1 use the LEGACY protocol. New policies and E0-H/E1-H use HARMONIZED;
+compare within protocols. FG-U blurs foreground only and preserves background.
+New probability math is FP32; weights remain FP16. P0 checks native baselines,
+geometry, filtered support and serial/batched behavior before selecting an
+execution policy. Rejected options are recorded; the chosen policy stays fixed.
 
-Actual Colab/A100 execution is a separate verification step from local CPU
-integration tests. Network failures, quota exhaustion and future runtime-image
-changes cannot be excluded by source review; caches, resumable downloads and
-explicit preflight checks reduce lost work.
+Reports retain failures, CHAIR, category coverage, length, timing scopes and
+paired image-bootstrap intervals. Diagnostics use provisional annotation
+matches; they do not establish causal explanations or guaranteed oracle bounds.
+Caption quality and ambiguous object mentions still need scientific review.
 
-## Scientific execution
+## Code and persistence
 
-P0 compares sampled E0 and E1 against the actual pinned native/legacy sampler.
-It checks actual model input geometry, displays the four RGB views, and measures
-serial versus packed branches and image batches 1/2/4/8. Backend candidates must
-pass forced-prefix logit checks and match greedy pilot outputs. Rejected options
-include any candidate that changes the pilot's original-view plausibility support.
-The selected backend/batch policy is locked for subsequent sessions;
-there is no silent OOM batch reduction or kernel switch mid-study.
+- `tas_runtime/`: model/data preparation, inference, attention, sampling and caches.
+- `experiments/tas_v7/`: views, policies, stages, evaluation and diagnostics.
+- `tools/build_colab_notebook.py`: package a committed experiment into the notebook.
+- Drive `code/`, `assets/`, `data/`, `nlp/`, `caches/`, `runs/`: source snapshots,
+  reusable files, results and reports. One writer per study/cache is supported.
 
-The initial fourteen are exactly E0, C0, C1, C2, E1, E2–E5 and F0–F4. The screen
-also records E0-H/E1-H as separate protocol controls. Native E1 retains raw-image
-masking before CLIP resize/crop and its original no-detection fallback. The new
-views use a locked processor canvas, RGB black, and nearest-neighbor mask geometry.
-FG-U blurs the **full image**, then replaces pixels **only inside foreground**;
-outside pixels remain unchanged. Probability/log math is FP32 for new policies;
-legacy E1 retains its native arithmetic. Temperature is applied once.
+An isolated Python 3.10.16 subprocess uses Torch 2.4.1 / torchvision 0.19.1 and
+Transformers 4.35.2. Colab's kernel is left intact. Profiles are in `requirements/`;
+CLIP builds with pinned setuptools and no build isolation. No external
+FlashAttention compilation is needed. See the official
+[PyTorch matrix](https://pytorch.org/get-started/previous-versions/),
+[uv Python guide](https://docs.astral.sh/uv/concepts/python-versions/) and
+[Colab storage/runtime guidance](https://research.google.com/colaboratory/faq.html).
 
-The two protocols are explicit:
+For optional AMBER/POPE, select `STAGE="external"`, the dataset and explicit
+JSONL/image paths. Select frozen methods there; do not tune on those benchmarks.
+The default notebook prepares COCO. AMBER's optional scorer uses the original
+evaluator and its separate `colab-amber.txt` profile.
 
-| Protocol | Purpose |
-|---|---|
-| LEGACY | Native E0 and original TAG E1 reproduction |
-| HARMONIZED | Matched canvas/FP32 support and new policies, with E0-H/E1-H controls |
-
-Do not interpret a cross-protocol table as a matched algorithm comparison.
-Within a method every view sees the same selected generated prefix, with separate
-KV rows. Across methods, prefixes diverge. Immutable visual features are reused
-only for exact input tensors within a minibatch; another method's generated logits
-or mutable KV cache are never replayed as free-running outputs.
-
-The owner explicitly changed the brief's original smoke-review pause. The default
-flow now continues automatically after blocking correctness checks:
-
-1. Smoke: 30 train images × fourteen methods.
-2. Screen: 240 locked val images, one seed, plus harmonized baseline controls.
-3. Shortlist: at most two P2 candidates ranked by CHAIRi, CHAIRs, coverage and
-   true mentions. Pareto tradeoffs are reported; no unapproved coverage tolerance
-   or automatic scientific winner is invented.
-4. Confirmation: 300 disjoint images, at least three seeds plus greedy, selected
-   candidates and baseline controls.
-5. Controls: fixed filter-off, duplicate-context, black-context, area-matched
-   random-region, context-only and temperature checks on the development screen
-   cohort. Their one-seed/greedy results are labeled development controls.
-   Context-only replaces object evidence with ORIG, preserving context weights
-   and the parent policy's scale/selective penalty.
-6. P0-D: 50–100 images from the locked diagnostic cohort, E0/E1/one finalist,
-   predicted evidence and D-MASK/D-BOX/D-MISS. Automatic category/box matching is
-   explicitly provisional and retained for review; ground-truth masks are not a
-   guaranteed upper bound. Fixed-prefix influence is a diagnostic, not accuracy
-   or a gate. D-FALSE needs independent absence verification; it is not fabricated.
-
-Final remainder opening is opt-in. FG-G/P2-A/adaptive/P3/P4/P5, learned controllers
-and a second backbone are later work, not automatically claimed implemented or
-validated. No COCO split is described as unseen during model training. Official
-POPE image IDs are reserved from development by default; exclusions and exact
-manifests are recorded before outputs exist.
-
-COCO CHAIR uses the original lexical mapping, instance plus reference-caption
-ground truth, and real COCO2017 IDs. The adapter was checked against the original
-CHAIR parser. Category coverage is separate annotation-scoped recall, not AMBER
-COVER. Reports include true/false mentions, length, empty-object rate, failures,
-warm generation cost, shared feature/perception cost and paired image-cluster
-bootstrap intervals. Caption quality and relation preservation still require
-independent review; the code does not invent a quality score.
-
-## Persistent files and reuse
-
-```text
-TAS-Shared/
-  code/                   # verified private source snapshot and file manifest
-  assets/                 # fixed model files, revisions, hashes and receipts
-  data/coco/              # image bytes, source annotations, locked cohorts
-  data/pope/              # official manifests used for overlap exclusion
-  nlp/                    # fixed NLP resources
-  caches/perception/      # immutable NPZ shards + verified index
-  preparations/           # complete preparation identities
-  runs/<identity>/        # config, P0/pilot, gallery, stage results and reports
-```
-
-Model/data files are shared across new ideas. Perception cache keys include image
-bytes, auxiliary model/source versions, precision and settings. Fusion changes do
-not recompute perception. Changing masks, view definitions, models, prompts,
-generation settings, execution policy or scientific source creates a distinct run.
-Resume identity includes image, query, method, seed and full protocol dependencies.
-Completed outputs cannot be overwritten; failures remain visible and retries do
-not silently exclude difficult examples. One writer per cache/run is supported.
-
-Results are fsynced locally and published as immutable incremental chunks, keeping
-Drive traffic proportional to new outputs. Perception is also bundled into shards.
-Peak VRAM, generated tokens and stage timing scopes are recorded. Warm feature-cache
-generation time is not presented as cold end-to-end image latency.
-
-## Optional AMBER and POPE
-
-Use `STAGE="external"`, choose `DATASET`, and provide a verified JSONL query
-manifest and image root in `EXTERNAL_MANIFEST` / `EXTERNAL_IMAGE_ROOT`. Select
-frozen finalist/baseline IDs in `METHODS`; do not tune there. The default COCO flow
-does not automatically download another full benchmark or open final data.
-
-The generic external manifest accepts official `question_id`/`text`/`image`
-fields (or `id`/`query`), preserving question identity and labels. Store the files
-under the same persistent root. Official AMBER images are linked in `AMBER/README.md`;
-normalize its JSON query array to JSONL without changing text or IDs. Missing files
-are rejected before captioning. POPE variants are evaluated separately with the
-official binary parser plus separately labeled invalid/Yes-rate diagnostics.
-
-AMBER additionally installs `requirements/colab-amber.txt` and its NLP resources.
-It calls the existing `AMBER/inference.py` with frozen resources and memoizes the
-unchanged NLP operations. The existing global-args dependency is supplied explicitly.
-Its evaluator/NLP model revisions are recorded. This optional full scorer profile
-has not been executed with real AMBER outputs locally.
-
-## Local checks and delivery
+## Local checks
 
 ```bash
-NLTK_DATA=/path/to/nltk_data python -m pytest tests -q
+NLTK_DATA=/path/to/prepared/nlp python -m pytest tests -q
 python -m compileall -q tas_runtime experiments tools tests
-python -m experiments.tas_v7.cli --config config.json --phase plan
-python tools/build_colab_notebook.py --commit <implementation-commit>
+python tools/build_colab_notebook.py --commit <tested-implementation-commit>
 ```
 
-The Python module sources on the local experiment branch are the editable
-implementation. Commit and test them, then generate the notebook from that exact
-commit. The notebook carries generated transport data, not another manually
-maintained scientific implementation. It saves the source archive and its hashes
-privately on Drive for reproducibility. Each file is checked before installation;
-no file in the pinned public baseline may be replaced. Code publication and
-promotion to main remain separate decisions; the notebook never pushes code.
+The tests passed from source restored by the notebook itself over a fresh public
+baseline clone. Notebook schema/cell syntax, compilation and lint passed.
+Full-checkpoint Colab/A100 execution and the optional full AMBER scorer remain
+unrun locally. P0 must pass on the actual GPU before bulk generation; no measured
+speedup or scientific improvement is claimed by the local fixtures.

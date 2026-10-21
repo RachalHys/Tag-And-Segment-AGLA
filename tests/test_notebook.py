@@ -49,3 +49,28 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["STAGE"] == "flow"
     assert namespace["SEEDS"] == [0, 1, 2]
     assert namespace["RUN_FINAL_REMAINDER"] is False
+    assert namespace["AUTO_SHUTDOWN"] is True
+
+
+def test_shutdown_flushes_drive_before_releasing_runtime(monkeypatch):
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    notebook = build("c" * 40, source_package=fixture_package("c" * 40))
+    cell = notebook["cells"][-1]["source"]
+    calls = []
+    colab = ModuleType("google.colab")
+    colab.runtime = SimpleNamespace(unassign=lambda: calls.append("release"))
+    monkeypatch.setitem(sys.modules, "google.colab", colab)
+    namespace = {
+        "AUTO_SHUTDOWN": True,
+        "drive": SimpleNamespace(flush_and_unmount=lambda: calls.append("flush")),
+    }
+    exec(compile(cell, "shutdown-cell", "exec"), namespace)
+    assert calls == ["flush", "release"]
+    calls.clear()
+    exec(
+        compile(cell, "shutdown-disabled", "exec"),
+        {**namespace, "AUTO_SHUTDOWN": False},
+    )
+    assert calls == []
