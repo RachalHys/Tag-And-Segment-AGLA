@@ -2,8 +2,8 @@
 
 The editable experiment code is on `experiment/tas-v7-colab`. The notebook is a
 launcher with a generated, compressed copy of those Python modules. It clones
-the fixed public baseline and restores the private modules automatically.
-No separate upload or public research push is needed. Keep the notebook private.
+the fixed public baseline and restores the experiment modules automatically.
+Only the notebook needs to be uploaded to Colab.
 
 ## Run in Colab
 
@@ -34,6 +34,14 @@ controls -> P0-D diagnostics (75 images). This follows the owner's later overrid
 of the original smoke review pause. Final remainder is opt-in. P3/P4/P5, FG-G,
 hidden interventions and a second backbone are deferred.
 
+The approved shortlist rule permits **at most two percentage points of measured
+coverage loss** versus harmonized TAG (`COVERAGE_TOLERANCE_PP=2.0`, absolute
+fraction 0.02). It requires an observed CHAIRi or
+CHAIRs improvement and excludes dominated policies. The tolerance is frozen in
+the run identity before outputs are seen. If no candidate qualifies, reports and
+baseline perception diagnostics are saved; confirmation and finalist controls
+stop without forcing a finalist.
+
 Native E0/E1 use the LEGACY protocol. New policies and E0-H/E1-H use HARMONIZED;
 compare within protocols. FG-U blurs foreground only and preserves background.
 New probability math is FP32; weights remain FP16. P0 checks native baselines,
@@ -41,7 +49,10 @@ geometry, filtered support and serial/batched behavior before selecting an
 execution policy. Rejected options are recorded; the chosen policy stays fixed.
 
 Reports retain failures, CHAIR, category coverage, length, timing scopes and
-paired image-bootstrap intervals. Diagnostics use provisional annotation
+paired image-bootstrap intervals and a descriptive exact-word-count paired
+comparison. Actual batch-return latency is separate from amortized seconds per
+image; older records without latency measurements report it as unavailable.
+Diagnostics use provisional annotation
 matches; they do not establish causal explanations or guaranteed oracle bounds.
 Caption quality and ambiguous object mentions still need scientific review.
 

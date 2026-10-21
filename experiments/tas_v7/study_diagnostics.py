@@ -90,7 +90,7 @@ def matched_annotation_instances(
     return matches
 
 
-def run_diagnostics(study, finalist):
+def run_diagnostics(study, finalist=None):
     rows = study.rows("audit")
     directory = study.persistent_run / "diagnostics"
     directory.mkdir(parents=True, exist_ok=True)
@@ -270,7 +270,9 @@ def run_diagnostics(study, finalist):
             prepared.update(perception=changed, perception_key=key)
             overrides[variant][row["image_id"]] = prepared
     atomic_jsonl(directory / "perception-audit.jsonl", audits)
-    methods = [method_by_id("E0"), method_by_id("E1"), finalist]
+    methods = [method_by_id("E0"), method_by_id("E1")]
+    if finalist is not None:
+        methods.append(finalist)
     original_records, _ = study.collection(
         "diagnostics-D-PRED", rows, methods, seeds=(study.config.seeds[0],)
     )

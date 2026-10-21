@@ -143,6 +143,11 @@ def test_real_tiny_multimodal_collection_resume_and_cpu_reports(study, monkeypat
         record["CHAIRs"] == 0 and record["actual_batch_images"] == 2
         for record in records
     )
+    assert all(
+        record["batch_latency_seconds"]
+        == pytest.approx(record["amortized_generation_seconds"] * 2)
+        for record in records
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Completed captions must not be recomputed")
@@ -183,8 +188,9 @@ def test_cpu_report_keeps_incomplete_and_failed_outputs_visible(tmp_path):
     assert len(report["failures"]) == 1
 
 
+@pytest.mark.parametrize("finalist", [None, "F4"])
 def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
-    study, monkeypatch
+    study, monkeypatch, finalist
 ):
     from experiments.tas_v7.study_diagnostics import run_diagnostics
 
@@ -201,13 +207,14 @@ def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
         )
 
     run.perception = SimpleNamespace(run=sam_rerun, close=lambda: None)
-    run_diagnostics(run, method_by_id("F4"))
+    method = method_by_id(finalist) if finalist else None
+    run_diagnostics(run, method)
     assert len(calls) == len(rows)
     expected = {"D-PRED": [0.8], "D-MASK": [None], "D-BOX": [0.91], "D-MISS": []}
     for variant, qualities in expected.items():
         saved = next(run.persistent_run.glob(f"diagnostics-{variant}-*/captions.jsonl"))
         records = [json.loads(line) for line in saved.read_text().splitlines()]
-        assert len(records) == len(rows) * 3
+        assert len(records) == len(rows) * (3 if finalist else 2)
         for record in records:
             metadata = record["perception_metadata"]
             assert metadata["sam_predicted_iou"] == qualities
@@ -218,13 +225,13 @@ def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
         raise AssertionError("Completed diagnostic inference must be reused")
 
     monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
-    run_diagnostics(run, method_by_id("F4"))
+    run_diagnostics(run, method)
     assert len(calls) == len(rows)
     (run.persistent_run / "diagnostics/fixed-prefix-influence.jsonl").write_text(
         "corrupted"
     )
     with pytest.raises(AssertionError, match="Completed diagnostic inference"):
-        run_diagnostics(run, method_by_id("F4"))
+        run_diagnostics(run, method)
     run.close()
 
 
@@ -259,3 +266,57 @@ def test_study_cli_plan_is_network_free(tmp_path):
     result = main(["--config", str(path), "--phase", "plan"])
     assert result["smoke"] == 420
     assert result["screen_initial"] == 3360
+    assert result["shortlist"]["maximum_coverage_loss_percentage_points"] == 2
+
+
+@pytest.mark.parametrize("improved", [False, True])
+def test_automatic_flow_obeys_scientific_shortlist_before_dependent_stages(
+    study, monkeypatch, improved
+):
+    from test_report import caption
+    from experiments.tas_v7 import study_diagnostics
+
+    run, rows = study
+    monkeypatch.setattr(run, "initialize", lambda: run)
+    monkeypatch.setattr(run, "audit", lambda: None)
+    monkeypatch.setattr(run, "rows", lambda cohort: rows)
+    calls = []
+
+    def collection(stage, rows, methods, **kwargs):
+        calls.append(stage)
+        # Only the stage boundary is stubbed. The actual scientific selector
+        # receives valid pooled counts and sees either a tie or a true gain.
+        records = [
+            {
+                **caption(
+                    method.id,
+                    false=2
+                    if stage == "screen" and improved and method.id == "F4"
+                    else 10,
+                ),
+                "protocol": method.protocol,
+            }
+            for method in methods
+        ]
+        return records, {}
+
+    monkeypatch.setattr(run, "collection", collection)
+    monkeypatch.setattr(
+        study_diagnostics, "run_diagnostics", lambda *_: calls.append("diagnostics")
+    )
+    result = run.run()
+    if improved:
+        assert result["status"] == "complete_first_round"
+        assert calls == [
+            "smoke",
+            "screen",
+            "confirm",
+            "temperature-0.7",
+            "temperature-1.0",
+            "temperature-1.3",
+            "controls",
+            "diagnostics",
+        ]
+    else:
+        assert result["status"] == "no_eligible_finalist"
+        assert calls == ["smoke", "screen", "diagnostics"]

@@ -29,6 +29,12 @@ def plan(config):
         "budget_minutes_per_session": config.max_session_minutes,
         "resume": "completed image/method/seed/config records are reused across sessions",
         "stage_flow": "automatic after blocking P0; smoke review pause overridden by owner",
+        "shortlist": {
+            "coverage_baseline": "E1-H",
+            "maximum_coverage_loss_percentage_points": 100 * config.coverage_tolerance,
+            "eligibility": "observed CHAIRi or CHAIRs improvement and no Pareto domination by matched sampled policies",
+            "no_eligible_candidate": "save report and stop dependent stages",
+        },
         "not_automatic": [
             "opening final remainder",
             "P3",

@@ -77,17 +77,20 @@ def build(
     recreated locally; the notebook kernel is left intact.
 
     Bring **only this notebook**. It clones the fixed public baseline, verifies
-    and restores its packaged private Python modules, then imports them normally.
-    The editable implementation remains in the local experiment branch; the
+    and restores its packaged experiment modules, then imports them normally.
+    The editable implementation remains in the experiment branch; the
     compressed package is generated from its exact commit. No separate source
-    upload, unpublished GitHub branch or research publication is required.
-    The code snapshot is also saved privately to Drive with its hashes.
+    upload is required. The code snapshot is also saved to Drive with its hashes.
 
     Automatic flow: blocking P0 audit → 30-image smoke → 240-image screen →
     predeclared shortlist → confirmation (3 seeds + greedy) → controls → P0-D.
     This implements the owner's explicit override of the earlier smoke review
     pause. Final remainder and P3/P4/P5 remain disabled by default. A session
     budget saves progress; the next Run all continues completed stages.
+    Shortlisting requires the predeclared coverage guard and a nondominated
+    observed hallucination improvement. If none qualifies, the study saves its
+    comparison and runs baseline perception diagnostics, then stops dependent
+    stages without forcing a finalist.
 
     Full A100 weights have not been tested by the local CPU suite. P0 rejects
     baseline mismatches before bulk generation. No scientific gains are assumed.
@@ -118,6 +121,7 @@ def build(
     ATTENTION_BACKENDS = ["eager", "sdpa"]
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
+    COVERAGE_TOLERANCE_PP = 2.0  # approved absolute percentage-point loss vs harmonized TAG; freeze before outputs
 
     def release_runtime():
         if AUTO_SHUTDOWN:
@@ -127,7 +131,7 @@ def build(
             runtime.unassign()
     """)
     code(
-        "# @title Versioned private source package — generated, do not edit\n"
+        "# @title Versioned experiment source package — generated, do not edit\n"
         + "SOURCE_PACKAGE = "
         + repr(source_package)
         + "\n\n"
@@ -140,8 +144,7 @@ def build(
     Drive authorization may prompt once per runtime. No credentials are saved
     in configuration or outputs. Source restoration is automatic and verifies
     both the archive and every file before installation. It cannot replace any
-    file from the frozen public baseline. Keep this notebook private because it
-    carries the experimental source. The same caches work in CPU/GPU sessions.
+    file from the frozen public baseline. The same caches work in CPU/GPU sessions.
     """)
     code(
         """
@@ -166,7 +169,7 @@ def build(
     import importlib
     importlib.invalidate_caches()
     print("Public baseline:", BASELINE_COMMIT)
-    print("Private Python source:", actual_commit, "| verified files:", len(source_receipt["files"]))
+    print("Experiment Python source:", actual_commit, "| verified files:", len(source_receipt["files"]))
     """,
         release_on_error=True,
     )
@@ -207,6 +210,7 @@ def build(
         "run_confirmation":RUN_CONFIRMATION, "run_controls":RUN_CONTROLS,
         "run_diagnostics":RUN_DIAGNOSTICS, "run_final":RUN_FINAL_REMAINDER,
         "reserve_pope":RESERVE_POPE_IMAGES, "split_seed":SPLIT_SEED,
+        "coverage_tolerance":COVERAGE_TOLERANCE_PP / 100.0,
         "dataset":DATASET, "external_manifest":EXTERNAL_MANIFEST, "external_image_root":EXTERNAL_IMAGE_ROOT,
         "auto_continue_after_smoke":True, "source_revision":actual_commit,
         "generation":{"max_new_tokens":180,"temperature":1.0,"top_p":1.0,"top_k":None,
@@ -265,6 +269,8 @@ def build(
     algorithm gain across them. CHAIR and annotation category recall do not
     establish caption quality or preserved relations. Inspect ambiguous images,
     captions, failures, coverage, length, timings and uncertainty together.
+    Reports include descriptive comparisons for paired captions with exactly
+    equal word counts. Batch latency and amortized seconds/image are separate.
     CPU scoring/report regeneration is available with PHASE="score".
     """)
     code(

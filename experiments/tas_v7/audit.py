@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 
 import torch
@@ -15,7 +16,7 @@ from tas_runtime.decoding import (
 )
 from tas_runtime.profiling import environment_manifest, synchronize
 from .methods import method_by_id, fuse_logits, plausibility_mask
-from .prepared import prepare_feature_batch, method_features
+from .prepared import prepare_feature_batch, method_features, pixel_key
 
 
 def decode_options(runtime, config, method, *, greedy=False, max_new_tokens=None):
@@ -65,7 +66,16 @@ def generate(
     )
 
 
-def compare_snapshots(reference, candidate, *, atol=0.04, rtol=0.01):
+def compare_snapshots(
+    reference,
+    candidate,
+    *,
+    atol=0.04,
+    rtol=0.01,
+    protocol="HARMONIZED",
+    beta=0.5,
+    support=True,
+):
     if len(reference) != len(candidate):
         raise AssertionError("Forced-prefix snapshot counts differ.")
     worst = 0.0
@@ -76,10 +86,11 @@ def compare_snapshots(reference, candidate, *, atol=0.04, rtol=0.01):
             worst = max(worst, float((first - second).abs().max()))
             torch.testing.assert_close(first, second, atol=atol, rtol=rtol)
             argmax_changes += int((first.argmax(-1) != second.argmax(-1)).sum())
-            if name == "ORIG":
+            if name == "ORIG" and support:
                 support_changes += int(
                     (
-                        plausibility_mask(first, 0.5) != plausibility_mask(second, 0.5)
+                        plausibility_mask(expected[name], beta, mode=protocol)
+                        != plausibility_mask(actual[name], beta, mode=protocol)
                     ).sum()
                 )
     if support_changes:
@@ -128,6 +139,26 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     ids = ids.unsqueeze(0).to(runtime.device)
     runtime.set_attention("eager")
     original_last = runtime.backend.last_position_logits
+    # The original E1 implementation defines sampling only. Audit that native
+    # path even when a study asks for greedy decoding; do not call an unrelated
+    # HF greedy_search path that would ignore E1's augmented image.
+    native_config = replace(
+        config,
+        generation=replace(
+            config.generation,
+            do_sample=True,
+            temperature=(
+                config.generation.temperature
+                if config.generation.temperature > 0
+                else 1.0
+            ),
+        ),
+    )
+    report["native_reference_generation"] = {
+        "do_sample": True,
+        "temperature": native_config.generation.temperature,
+        "scope": "original sampled E0/E1; separate from study greedy policy checks",
+    }
     # Original model computes all prompt logits. Keep the reference comparison
     # independent of the optional last-position projection optimization.
     runtime.backend.last_position_logits = False
@@ -154,13 +185,13 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                 pixels.get("OBJ-H"),
                 seed=seed,
                 max_new_tokens=config.pilot_tokens,
-                temperature=config.generation.temperature,
+                temperature=native_config.generation.temperature,
                 top_p=config.generation.top_p,
                 top_k=config.generation.top_k,
             )[0].tolist()
             candidate = generate(
                 runtime,
-                config,
+                native_config,
                 method,
                 ids,
                 pixels,
@@ -186,7 +217,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                 runtime.backend.last_position_logits = True
                 optimized = generate(
                     runtime,
-                    config,
+                    native_config,
                     method,
                     ids,
                     pixels,
@@ -212,8 +243,10 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
 
     pilot_rows = rows[: config.pilot_images]
     pilot_prepared = prepared[: len(pilot_rows)]
-    # V=3 measures the expensive candidate topology; B counts actual images.
-    method = method_by_id("F4")
+    # Audit the native baselines as well as the expensive V=3 topology. Every
+    # candidate uses the same cached-feature path as the actual study, compared
+    # with per-image eager/full-head RAW PIXEL references, not cached features.
+    pilot_methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
     prompt_ids = [
         runtime.prompt(row["query"], config.generation.conv_mode)[1]
         for row in pilot_rows
@@ -223,44 +256,71 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
             "The captioning pilot requires equal-length prompts; external VQA uses length buckets later."
         )
     all_ids = torch.stack(prompt_ids).to(runtime.device)
-    feature_start = time.perf_counter()
-    features = prepare_feature_batch(runtime, pilot_prepared, [method])
-    synchronize(runtime.device)
-    report["feature_preparation_seconds"] = time.perf_counter() - feature_start
-    originals = method_features(features, method)
-    seeds = [
-        record_seed(config.seeds[0], row["image_id"], method.id, row["query"])
-        for row in pilot_rows
-    ]
-    reference_logits = []
-    reference_greedy = []
     forced = [
         int(runtime.tokenizer.bos_token_id or 1),
         int(runtime.tokenizer.eos_token_id),
         1,
     ]
-    for index in range(len(pilot_rows)):
-        single = {name: value[index : index + 1] for name, value in originals.items()}
-        reference_logits.append(
-            forced_prefix_logits(
-                runtime.backend,
-                all_ids[index : index + 1],
-                single,
-                forced,
-                execution="serial",
-            )
-        )
-        reference_greedy += generate(
-            runtime,
-            config,
-            method,
-            all_ids[index : index + 1],
-            single,
-            [seeds[index]],
-            greedy=True,
-            execution="serial",
-            max_new_tokens=config.pilot_tokens,
-        ).token_ids
+    references = {}
+    runtime.backend.last_position_logits = False
+    try:
+        for method in pilot_methods:
+            seeds = [
+                record_seed(config.seeds[0], row["image_id"], method.id, row["query"])
+                for row in pilot_rows
+            ]
+            reference = {"seeds": seeds, "logits": [], "greedy": [], "sample": []}
+            for index, item in enumerate(pilot_prepared):
+                single = {
+                    name: item["pixels"][pixel_key(method, name)]
+                    .unsqueeze(0)
+                    .to(runtime.device, runtime.dtype)
+                    for name in method.views
+                }
+                reference["logits"].append(
+                    forced_prefix_logits(
+                        runtime.backend,
+                        all_ids[index : index + 1],
+                        single,
+                        forced,
+                        execution="serial",
+                    )
+                )
+                modes = (
+                    ("greedy", "sample")
+                    if method.protocol == "LEGACY" and config.generation.do_sample
+                    else ("greedy",)
+                )
+                for mode in modes:
+                    reference[mode] += generate(
+                        runtime,
+                        config,
+                        method,
+                        all_ids[index : index + 1],
+                        single,
+                        [seeds[index]],
+                        greedy=mode == "greedy",
+                        execution="serial",
+                        max_new_tokens=config.pilot_tokens,
+                    ).token_ids
+            references[method.id] = reference
+    except Exception as exc:
+        report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        atomic_json(root / "audit.json", report)
+        raise
+    finally:
+        runtime.backend.last_position_logits = original_last
+    feature_start = time.perf_counter()
+    features = prepare_feature_batch(runtime, pilot_prepared, pilot_methods)
+    synchronize(runtime.device)
+    report["feature_preparation_seconds"] = time.perf_counter() - feature_start
+    report["execution_reference"] = {
+        "methods": [method.id for method in pilot_methods],
+        "input": "per-image raw pixels; eager attention; full-position vocabulary head",
+        "candidate_input": "cached projected features; selected head, attention and batch policy",
+        "checks": "fixed-prefix logits/support, greedy tokens, native sampled tokens when study samples",
+        "scope": "pilot only; no bitwise equivalence guarantee for unseen images or longer captions",
+    }
     eligible = []
     for backend_name in config.attention_backends:
         for execution in (
@@ -285,54 +345,77 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                     "execution": execution,
                     "batch_images": requested,
                     "views": 3,
+                    "method_checks": {},
                 }
                 try:
                     runtime.set_attention(backend_name)
                     count = requested
-                    local_views = {
-                        name: value[:count] for name, value in originals.items()
-                    }
-                    actual = forced_prefix_logits(
-                        runtime.backend,
-                        all_ids[:count],
-                        local_views,
-                        forced,
-                        execution=execution,
-                    )
-                    expected = [
-                        {
-                            name: torch.cat(
-                                [reference_logits[i][step][name] for i in range(count)]
-                            )
-                            for name in method.views
+                    for method in pilot_methods:
+                        reference = references[method.id]
+                        local_views = {
+                            name: value[:count]
+                            for name, value in method_features(features, method).items()
                         }
-                        for step in range(len(forced) + 1)
-                    ]
-                    item.update(compare_snapshots(expected, actual))
-                    result = generate(
-                        runtime,
-                        config,
-                        method,
-                        all_ids[:count],
-                        local_views,
-                        seeds[:count],
-                        greedy=True,
-                        execution=execution,
-                        max_new_tokens=config.pilot_tokens,
-                    )
-                    item["greedy_match"] = result.token_ids == reference_greedy[:count]
-                    if not item["greedy_match"]:
-                        raise AssertionError(
-                            "Greedy pilot captions changed; candidate not selected automatically."
+                        actual = forced_prefix_logits(
+                            runtime.backend,
+                            all_ids[:count],
+                            local_views,
+                            forced,
+                            execution=execution,
                         )
+                        expected = [
+                            {
+                                name: torch.cat(
+                                    [
+                                        reference["logits"][i][step][name]
+                                        for i in range(count)
+                                    ]
+                                )
+                                for name in method.views
+                            }
+                            for step in range(len(forced) + 1)
+                        ]
+                        checks = {"protocol": method.protocol}
+                        item["method_checks"][method.id] = checks
+                        checks.update(
+                            compare_snapshots(
+                                expected,
+                                actual,
+                                protocol=method.protocol,
+                                beta=method.beta,
+                                support=method.support,
+                            )
+                        )
+                        for mode in ("greedy", "sample"):
+                            if not reference[mode]:
+                                continue
+                            result = generate(
+                                runtime,
+                                config,
+                                method,
+                                all_ids[:count],
+                                local_views,
+                                reference["seeds"][:count],
+                                greedy=mode == "greedy",
+                                execution=execution,
+                                max_new_tokens=config.pilot_tokens,
+                            )
+                            checks[mode + "_match"] = (
+                                result.token_ids == reference[mode][:count]
+                            )
+                            if not checks[mode + "_match"]:
+                                raise AssertionError(
+                                    f"{method.id} {mode} pilot captions changed; candidate not selected automatically."
+                                )
                     # Warm one more run, with comparable maximum token budget.
+                    # The final method in pilot_methods is the V=3 F4 topology.
                     result = generate(
                         runtime,
                         config,
                         method,
                         all_ids[:count],
                         local_views,
-                        seeds[:count],
+                        reference["seeds"][:count],
                         greedy=True,
                         execution=execution,
                         max_new_tokens=config.pilot_tokens,

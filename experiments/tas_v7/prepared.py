@@ -50,6 +50,15 @@ def prepare_image(
     random_views = create_views(canvas, random_mask, config=view_config)
     for name in ("OBJ-H", "BH", "FG-U"):
         pixels["RANDOM_" + name] = runtime.pixels(random_views[name], canvas=True)
+    legacy_random_mask = area_matched_random_mask(
+        perception.mask,
+        np.random.default_rng(
+            record_seed(random_seed, image_digest, "legacy-random-region-v1")
+        ),
+    )
+    pixels["LEGACY_RANDOM_OBJ-H"] = runtime.pixels(
+        legacy_object_view(raw, legacy_random_mask)
+    )
     return {
         "pixels": pixels,
         "views": views,
@@ -68,12 +77,16 @@ def prepare_image(
 
 
 def pixel_key(method, view):
-    if method.id == "E1" and method.protocol == "LEGACY" and view == "OBJ-H":
-        return "LEGACY_OBJ-H"
+    # Controls replace their named input first. Renaming a method or removing
+    # its support filter must otherwise preserve its protocol's geometry.
     if method.control == "black_context" and view == method.context_view:
         return "BLACK"
     if method.control == "random_region" and view != "ORIG":
+        if method.protocol == "LEGACY" and view == "OBJ-H":
+            return "LEGACY_RANDOM_OBJ-H"
         return "RANDOM_" + view
+    if method.protocol == "LEGACY" and view == "OBJ-H":
+        return "LEGACY_OBJ-H"
     return view
 
 

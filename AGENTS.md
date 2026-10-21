@@ -18,5 +18,7 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   fixtures do not establish full-checkpoint parity or A100 performance.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
+- Freeze the shortlist coverage rule before outputs: the approved default is
+  at most two absolute percentage points of loss versus E1-H; never force a finalist.
 - Keep models, datasets, caches, results and delivery bundles out of Git.
   Research publication and promotion to main are separate from local validation.

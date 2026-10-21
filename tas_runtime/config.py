@@ -62,6 +62,7 @@ class StudyConfig:
     bootstrap_seed: int = 20261022
     bootstrap_replicates: int = 1000
     shortlist_count: int = 2
+    coverage_tolerance: float = 0.02  # owner approved two absolute percentage points
     diagnostic_count: int = 75
     auto_continue_after_smoke: bool = True
     run_confirmation: bool = True
@@ -120,6 +121,8 @@ class StudyConfig:
             )
         if not 1 <= self.shortlist_count <= 2:
             raise ValueError("The initial screen shortlists at most two methods.")
+        if not 0 <= self.coverage_tolerance <= 1:
+            raise ValueError("coverage_tolerance must be a finite fraction in [0,1].")
         if (
             self.pilot_tokens < 2
             or self.pilot_images < 2

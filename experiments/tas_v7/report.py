@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections import defaultdict
 import csv
 import io
+import math
 from pathlib import Path
 
 import numpy as np
 
 from tas_runtime.artifacts import atomic_json, atomic_jsonl
-from .evaluation import aggregate_caption_metrics, paired_cluster_bootstrap
+from .evaluation import (
+    aggregate_caption_metrics,
+    paired_cluster_bootstrap,
+    _pairing_key,
+)
 
 
 def summarize(records):
@@ -21,7 +26,17 @@ def summarize(records):
         if "object_mentions" in records[0]
         else {"n_captions": len(records)}
     )
-    elapsed = [row.get("generation_seconds", 0.0) for row in records]
+    # Older saved records contain only amortized generation_seconds. They can
+    # still supply throughput, but cannot establish request/batch latency.
+    elapsed = [
+        row.get("amortized_generation_seconds", row.get("generation_seconds", 0.0))
+        for row in records
+    ]
+    latency = [
+        row["batch_latency_seconds"]
+        for row in records
+        if "batch_latency_seconds" in row
+    ]
     tokens = [row.get("generated_tokens", 0) for row in records]
     total = sum(elapsed)
     result.update(
@@ -29,10 +44,18 @@ def summarize(records):
         captions_per_hour_warm=3600 * len(records) / total if total else None,
         generated_tokens=sum(tokens),
         tokens_per_caption=float(np.mean(tokens)),
-        p50_seconds=float(np.percentile(elapsed, 50)),
-        p95_seconds=float(np.percentile(elapsed, 95)),
+        p50_batch_latency_seconds=float(np.percentile(latency, 50))
+        if latency
+        else None,
+        p95_batch_latency_seconds=float(np.percentile(latency, 95))
+        if latency
+        else None,
+        latency_record_count=len(latency),
+        p50_amortized_seconds_per_image=float(np.percentile(elapsed, 50)),
+        p95_amortized_seconds_per_image=float(np.percentile(elapsed, 95)),
         peak_memory_bytes=max(row.get("peak_memory_bytes", 0) for row in records),
         cost_scope="warm decoder prefill+decode; CLIP features, perception, storage and setup reported separately",
+        latency_scope="elapsed prefill+decode until the whole image batch returns; no queue/setup/perception time",
     )
     return result
 
@@ -54,19 +77,37 @@ def grouped_summary(records):
     ]
 
 
-def select_finalists(records, *, count=2):
-    """Predeclared exploratory ranking; never claims statistical significance.
+def select_finalists(records, *, count=2, coverage_tolerance=0.02):
+    """Shortlist observed hallucination improvements under a locked coverage rule.
 
-    Rank P2 candidates by pooled CHAIRi, then CHAIRs, then coverage, then
-    true-object mentions. Also report their Pareto status and baseline deltas.
-    No unapproved coverage-loss threshold is silently imposed.
+    Coverage is compared with E1-H in the same sampled protocol. Exclude policies
+    dominated by another candidate or matched control, then rank at most two.
+    This development rule is not a significance or caption-quality guarantee.
     """
-    summaries = grouped_summary(records)
+    if not math.isfinite(coverage_tolerance) or not 0 <= coverage_tolerance <= 1:
+        raise ValueError("coverage_tolerance must be a finite fraction in [0,1].")
+    if not 1 <= count <= 2:
+        raise ValueError("Shortlist count must be one or two.")
+    summaries = [
+        row
+        for row in grouped_summary(records)
+        if row["protocol"] == "HARMONIZED" and row["generation_mode"] == "sample"
+    ]
+    baseline = next((row for row in summaries if row["method"] == "E1-H"), None)
+    if baseline is None or any(
+        baseline.get(key) is None for key in ("CHAIRi", "CHAIRs", "category_coverage")
+    ):
+        raise ValueError(
+            "Automatic shortlisting requires scored HARMONIZED sampled E1-H with coverage."
+        )
     candidates = [
         row
         for row in summaries
         if row["method"] in {"E2", "E3", "E4", "E5", "F1", "F2", "F3", "F4"}
-        and row.get("CHAIRi") is not None
+        and all(
+            row.get(key) is not None
+            for key in ("CHAIRi", "CHAIRs", "category_coverage")
+        )
     ]
     if not candidates:
         raise ValueError(
@@ -81,7 +122,20 @@ def select_finalists(records, *, count=2):
             row["method"],
         )
     )
+    comparisons = [
+        row
+        for row in summaries
+        if all(
+            row.get(key) is not None
+            for key in ("CHAIRi", "CHAIRs", "category_coverage")
+        )
+    ]
     for row in candidates:
+        row["coverage_delta"] = row["category_coverage"] - baseline["category_coverage"]
+        row["coverage_pass"] = row["coverage_delta"] >= -coverage_tolerance - 1e-12
+        row["hallucination_improved"] = (
+            row["CHAIRi"] < baseline["CHAIRi"] or row["CHAIRs"] < baseline["CHAIRs"]
+        )
         row["pareto_dominated"] = any(
             other["CHAIRi"] <= row["CHAIRi"]
             and other["CHAIRs"] <= row["CHAIRs"]
@@ -91,15 +145,57 @@ def select_finalists(records, *, count=2):
                 or other["CHAIRs"] < row["CHAIRs"]
                 or (other["category_coverage"] or 0) > (row["category_coverage"] or 0)
             )
-            for other in candidates
+            for other in comparisons
             if other is not row
         )
+        row["eligible"] = (
+            row["coverage_pass"]
+            and row["hallucination_improved"]
+            and not row["pareto_dominated"]
+        )
+    selected = [row["method"] for row in candidates if row["eligible"]][:count]
     return {
-        "selected": [row["method"] for row in candidates[:count]],
+        "schema": "tas-shortlist-v2",
+        "selected": selected,
         "candidates": candidates,
-        "selection_rule": "CHAIRi, CHAIRs ascending; category coverage, true mentions descending; ID tie-break",
-        "coverage_tolerance": None,
-        "interpretation": "development shortlist only; coverage/quality tradeoffs require joint review; no automatic winner claim",
+        "baseline": baseline,
+        "selection_rule": "coverage guard vs E1-H; improve CHAIRi or CHAIRs; nondominated among matched sampled policies; rank CHAIRi/CHAIRs, coverage/true mentions, ID",
+        "coverage_tolerance": coverage_tolerance,
+        "coverage_units": "absolute category-coverage fraction; 0.01 = one percentage point",
+        "status": "shortlisted" if selected else "no_eligible_finalist",
+        "interpretation": "development shortlist only; tradeoffs and caption quality require review; no automatic winner/significance claim",
+    }
+
+
+def equal_length_comparison(baseline, candidate):
+    """Descriptive paired subset; conditioning on output length is not causal proof."""
+    first = {_pairing_key(row): row for row in baseline}
+    second = {_pairing_key(row): row for row in candidate}
+    if (
+        len(first) != len(baseline)
+        or len(second) != len(candidate)
+        or first.keys() != second.keys()
+    ):
+        raise ValueError(
+            "Equal-length comparison needs unique, aligned image/query/seed records."
+        )
+    matched = [
+        key
+        for key in first
+        if first[key]["length_words"] == second[key]["length_words"]
+    ]
+    return {
+        "paired_records": len(first),
+        "matched_records": len(matched),
+        "matched_image_ids": sorted({key[0] for key in matched}),
+        "baseline": aggregate_caption_metrics([first[key] for key in matched])
+        if matched
+        else None,
+        "candidate": aggregate_caption_metrics([second[key] for key in matched])
+        if matched
+        else None,
+        "matching_rule": "same image/query/seed and exactly equal word counts; no caption truncation",
+        "interpretation": "descriptive selected subset; unequal lengths remain in the main report; does not establish caption quality or causal mechanism",
     }
 
 
@@ -117,6 +213,7 @@ def write_report(
     root.mkdir(parents=True, exist_ok=True)
     summary = grouped_summary(records)
     paired = []
+    equal_length = []
     by_group = defaultdict(list)
     for row in records:
         by_group[
@@ -130,6 +227,30 @@ def write_report(
             or "object_mentions" not in rows[0]
         ):
             continue
+        try:
+            comparison = equal_length_comparison(
+                by_group[(protocol, mode, baseline)], rows
+            )
+            equal_length.append(
+                {
+                    "baseline_method": baseline,
+                    "candidate_method": method,
+                    "protocol": protocol,
+                    "mode": mode,
+                    **comparison,
+                }
+            )
+        except ValueError as exc:
+            equal_length.append(
+                {
+                    "baseline_method": baseline,
+                    "candidate_method": method,
+                    "protocol": protocol,
+                    "mode": mode,
+                    "status": "unpaired",
+                    "reason": str(exc),
+                }
+            )
         for metric in ("CHAIRi", "CHAIRs", "category_coverage", "length_words"):
             try:
                 result = paired_cluster_bootstrap(
@@ -161,6 +282,7 @@ def write_report(
     output = {
         "summary": summary,
         "paired": paired,
+        "equal_length_comparisons": equal_length,
         "failures": list(failures),
         "expected_outputs": expected,
         "completed_outputs": len(records),
@@ -187,6 +309,9 @@ def write_report(
         "length_words",
         "tokens_per_caption",
         "captions_per_hour_warm",
+        "p50_batch_latency_seconds",
+        "p95_batch_latency_seconds",
+        "p50_amortized_seconds_per_image",
         "peak_memory_bytes",
     ]
     stream = io.StringIO()

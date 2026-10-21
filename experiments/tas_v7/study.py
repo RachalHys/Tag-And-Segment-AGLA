@@ -307,6 +307,12 @@ class Study:
             "yolo_conf": self.config.yolo_conf,
             "expansion_ratio": self.config.expansion_ratio,
             "seeds": list(self.config.seeds),
+            "selection_policy": {
+                "schema": "tas-shortlist-v2",
+                "baseline": "E1-H",
+                "coverage_tolerance": self.config.coverage_tolerance,
+                "max_finalists": self.config.shortlist_count,
+            },
             "methods": [method.to_dict() for method in initial_methods()],
             "nlp": self.work["preparation"]["nlp"],
             "environment": environment_manifest(),
@@ -646,10 +652,14 @@ class Study:
                                         "token_ids": tokens,
                                         "generated_tokens": len(tokens),
                                         "stop_reason": reason,
-                                        "generation_seconds": elapsed / len(batch),
-                                        "prefill_seconds": result.prefill_seconds
+                                        "batch_latency_seconds": elapsed,
+                                        "batch_prefill_seconds": result.prefill_seconds,
+                                        "batch_decode_seconds": result.decode_seconds,
+                                        "amortized_generation_seconds": elapsed
                                         / len(batch),
-                                        "decode_seconds": result.decode_seconds
+                                        "amortized_prefill_seconds": result.prefill_seconds
+                                        / len(batch),
+                                        "amortized_decode_seconds": result.decode_seconds
                                         / len(batch),
                                         "peak_memory_bytes": result.peak_memory_bytes,
                                         "actual_batch_images": len(batch),
@@ -779,7 +789,11 @@ class Study:
                     screen_methods,
                     seeds=(self.config.seeds[0],),
                 )
-                selection = select_finalists(screen, count=self.config.shortlist_count)
+                selection = select_finalists(
+                    screen,
+                    count=self.config.shortlist_count,
+                    coverage_tolerance=self.config.coverage_tolerance,
+                )
                 if (
                     selection_path.exists()
                     and json.loads(selection_path.read_text())["selected"]
@@ -799,6 +813,17 @@ class Study:
                 method_by_id(name)
                 for name in json.loads(selection_path.read_text())["selected"]
             ]
+            if not finalists:
+                # Perception diagnostics are useful even when the fusion
+                # hypotheses fail screening; they do not need a P2 finalist.
+                if stage in {"flow", "diagnostics"} and self.config.run_diagnostics:
+                    from .study_diagnostics import run_diagnostics
+
+                    run_diagnostics(self)
+                return self.finish(
+                    "no_eligible_finalist",
+                    note="No nondominated P2 candidate improved observed hallucination under the frozen coverage rule. Saved the comparison; dependent stages were not opened.",
+                )
             baselines = [
                 method_by_id(name) for name in ("E0", "E1", "F0")
             ] + harmonized_baselines()
