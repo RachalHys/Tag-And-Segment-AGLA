@@ -1,0 +1,25 @@
+# Dedicated Python 3.10 environment; Torch is installed separately for CPU/cu121.
+transformers==4.35.2
+tokenizers==0.15.2
+huggingface-hub==0.25.2
+accelerate==0.24.1
+safetensors==0.4.5
+sentencepiece==0.2.0
+numpy==1.26.4
+Pillow==10.4.0
+opencv-python==4.10.0.84
+pycocotools==2.0.8
+nltk==3.9.1
+textblob==0.18.0.post0
+scipy==1.14.1
+matplotlib==3.9.2
+pandas==2.2.3
+psutil==6.1.0
+PyYAML==6.0.2
+requests==2.32.3
+tqdm==4.67.1
+packaging==24.2
+pytest==8.3.3
+nbformat==5.10.4
+setuptools==75.6.0
+wheel==0.45.1
