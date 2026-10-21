@@ -329,12 +329,11 @@ def main():
     parser.add_argument("--output", default="notebooks/TAS_v7_Colab.ipynb")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    commit = (
-        args.commit
-        or subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip()
-    )
+    commit = subprocess.check_output(
+        ["git", "rev-parse", (args.commit or "HEAD") + "^{commit}"],
+        cwd=root,
+        text=True,
+    ).strip()
     notebook = build(commit, source_package=package_from_commit(root, commit))
     path = root / args.output
     path.parent.mkdir(parents=True, exist_ok=True)

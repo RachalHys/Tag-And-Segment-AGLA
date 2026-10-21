@@ -5,6 +5,36 @@ from tools.build_colab_notebook import build
 from tools.notebook_delivery import BASE_COMMIT
 
 
+def test_builder_resolves_git_ref_to_fixed_commit(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    import subprocess
+    from tools.build_colab_notebook import main
+
+    root = Path(__file__).resolve().parents[1]
+    # Archive transport is tested separately. Keep this check focused on real
+    # Git-ref resolution, including in the restored baseline checkout.
+    monkeypatch.setattr(
+        "tools.build_colab_notebook.package_from_commit",
+        lambda root, commit: fixture_package(commit),
+    )
+    destination = tmp_path / "notebook.ipynb"
+    monkeypatch.setattr(
+        "sys.argv", ["builder", "--commit", "HEAD", "--output", str(destination)]
+    )
+    main()
+    value = json.loads(destination.read_text())
+    settings = next(
+        cell["source"] for cell in value["cells"] if cell["cell_type"] == "code"
+    )
+    namespace = {}
+    exec(settings, namespace)
+    expected = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    assert namespace["RESEARCH_COMMIT"] == expected
+
+
 def fixture_package(commit):
     return {
         "schema": "tas-private-source-v1",
