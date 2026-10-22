@@ -28,6 +28,9 @@ class Tokenizer:
     def decode(self, tokens, skip_special_tokens=True):
         return "A cat."
 
+    def batch_decode(self, rows, **kwargs):
+        return [self.decode(row, **kwargs) for row in rows]
+
 
 @pytest.fixture
 def study(tmp_path, model):

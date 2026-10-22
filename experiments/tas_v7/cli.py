@@ -13,6 +13,20 @@ from tas_runtime.config import StudyConfig
 
 
 def plan(config):
+    if config.stage == "batch_compare":
+        return {
+            "stage": "batch_compare",
+            "cohort": f"first {config.comparison_images} frozen development images from A",
+            "methods": list(config.methods or ("E0", "E1", "E1-H", "F4")),
+            "seed": config.seeds[0],
+            "complete_captions": 2 * config.comparison_images * (len(config.methods) or 4),
+            "reference": "strict P0; serial B=1; native baseline, geometry and support gates unchanged",
+            "candidate": "same attention/head/precision; image batching and optional view packing; speed selection before quality scores",
+            "output": "paired quality, token drift, full-caption throughput; sampled operator profile",
+            "promotion": "none; descriptive pilot, no equivalence margin assumed",
+            "resume": "separate reference/candidate ledgers; no successful study output overwritten",
+            "budget_minutes_per_session": config.max_session_minutes,
+        }
     count = len(config.methods) or 14
     seeds = len(config.seeds)
     methods_confirm = 5 + config.shortlist_count

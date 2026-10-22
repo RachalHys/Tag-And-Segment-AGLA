@@ -17,6 +17,42 @@ supplies policy-selection timings. CUDA-profiler unavailability is reported
 without changing P0; generation errors still stop the run. Completed P0 evidence
 is saved first, and each profile clears older operator tables.
 
+`notebooks/TAS_v7_Batch_Compare.ipynb` is a separate, bounded execution comparison
+authorized after the A100 rejected every batched strict-token candidate. Use
+this notebook on A100 with **Run all** and the existing `TAS-Shared` folder;
+existing CPU preparation is reused. The regular notebook still defaults to flow.
+
+The comparison keeps native E0/E1, geometry, support and strict execution gates
+for a serial B=1 reference. It then tests the largest configured image batch
+(default B=4), with serial and packed views, holding attention/head/precision
+fixed. Initial forced-prefix numerical/support failures still reject a candidate;
+free greedy token differences are recorded under a separate execution protocol.
+At their first divergence, a natural-prefix replay records branch logit errors,
+support differences, top-two margins, sampling-distribution total variation and
+whether replay reproduced the observed choices. A failure to reproduce them
+remains unresolved; the report does not infer harmless rounding.
+
+Before looking at quality scores, it freezes the candidate with the higher
+sampled F4 token throughput in a warmed, up-to-48-token probe. It compares
+**12 frozen A development images × E0/E1/E1-H/F4 × one sampled seed × two policies
+= 96 complete captions**, with the normal EOS/180-token limit. Separate ledgers
+retain the original method IDs/RNG keys. Results include paired CHAIR, coverage,
+length and image-bootstrap intervals, exact-token/caption rates, changed-caption
+examples, EOS/truncation rates, full-caption throughput and peak memory. CHAIRi
+uses pooled mention counts. Warm generation speed excludes shared setup,
+perception, feature preparation and profiling; the short probe does not promise
+full-stage speed. Sampled E0/F4 B=1 profiles save operator tables and explicit
+scalar-read, synchronization, transfer, matrix-multiply and attention totals.
+
+This is a **descriptive pilot**, not a test establishing equivalence. One seed
+and 12 already-inspected development images cannot validate all 14 methods or
+held-out quality. A confidence interval containing zero is not equivalence.
+The two-point shortlist coverage rule supplies no execution-equivalence margin.
+No rejected policy is promoted to strict P0 or automatically used in full flow.
+The comparison saves `batch-comparison-*/comparison.json`, `discovery.json`,
+`changed-captions.jsonl` and per-policy results in its own run directory, then
+releases the runtime. Completed captions resume without regeneration.
+
 ## Run in Colab
 
 1. Upload `notebooks/TAS_v7_Colab.ipynb` and select a **CPU** runtime.

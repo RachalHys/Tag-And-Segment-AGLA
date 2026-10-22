@@ -56,6 +56,7 @@ class StudyConfig:
     last_position_logits: bool = True
     pilot_tokens: int = 24
     pilot_images: int = 8
+    comparison_images: int = 12
     max_retries: int = 2
     snapshot_every: int = 32
     split_seed: int = 20261021
@@ -82,6 +83,7 @@ class StudyConfig:
         if self.stage not in {
             "flow",
             "audit",
+            "batch_compare",
             "smoke",
             "screen",
             "confirm",
@@ -130,6 +132,16 @@ class StudyConfig:
             or self.snapshot_every < 1
         ):
             raise ValueError("Invalid pilot, retry or snapshot settings.")
+        if not isinstance(self.comparison_images, int) or not 2 <= self.comparison_images <= 30:
+            raise ValueError("Batch comparison uses 2-30 development images from cohort A.")
+        if self.stage == "batch_compare":
+            if not self.generation.do_sample or not 2 <= max(self.batch_sizes) <= self.comparison_images:
+                raise ValueError("Batch comparison requires sampling and 2 <= image batch <= comparison_images.")
+            if self.methods and (
+                len(self.methods) != len(set(self.methods))
+                or not {"E0", "E1", "F4"} <= set(self.methods)
+            ):
+                raise ValueError("Comparison methods must be unique and include E0, E1 and F4.")
         if self.max_session_minutes <= 0:
             raise ValueError(
                 "max_session_minutes must be positive; unfinished stages resume next session."

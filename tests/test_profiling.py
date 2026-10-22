@@ -18,6 +18,8 @@ def test_cpu_operator_profile_calls_once_and_persists_small_summary(tmp_path):
     assert calls == [1]
     assert result["status"] == "complete"
     assert "aten::mm" in (tmp_path / "operators.txt").read_text()
+    operators = json.loads((tmp_path / "operators.json").read_text())
+    assert any(item["name"] == "aten::mm" and item["count"] == 1 for item in operators["operators"])
     assert json.loads((tmp_path / "profile.json").read_text()) == result
     assert not list(tmp_path.glob("*.pt.trace.json"))
 
@@ -50,6 +52,8 @@ def test_profile_propagates_generation_failure(tmp_path, error_type):
 def test_unavailable_profile_removes_old_operator_table(tmp_path, monkeypatch):
     table = tmp_path / "operators.txt"
     table.write_text("stale measurements from a previous session")
+    totals = tmp_path / "operators.json"
+    totals.write_text("stale operator totals")
 
     def unavailable(**kwargs):
         raise RuntimeError("CUPTI unavailable")
@@ -58,6 +62,7 @@ def test_unavailable_profile_removes_old_operator_table(tmp_path, monkeypatch):
     result = profile_call(lambda: None, tmp_path, device="cpu")
     assert result["status"] == "unavailable"
     assert not table.exists()
+    assert not totals.exists()
 
 
 def test_stage_names_and_bar_are_visible_on_redirected_stdout(capsys):

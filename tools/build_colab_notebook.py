@@ -94,8 +94,8 @@ def build(
     source_package,
     stage="flow",
 ):
-    if stage not in {"flow", "audit"}:
-        raise ValueError("Notebook default stage must be flow or audit.")
+    if stage not in {"flow", "audit", "batch_compare"}:
+        raise ValueError("Notebook default stage must be flow, audit or batch_compare.")
     if (
         source_package["source_commit"] != commit
         or source_package["base_commit"] != BASE_COMMIT
@@ -141,6 +141,20 @@ def build(
         then releases the runtime. It does not start the 420-caption smoke run.
         Use `STAGE="flow"` for the complete study after choosing the execution policy.
         """)
+    if stage == "batch_compare":
+        markdown("""
+        **Batched execution comparison:** this notebook defaults to
+        `STAGE="batch_compare"`. It keeps strict P0 for a serial B=1 reference,
+        measures serial and packed B=4, then freezes the faster sampled F4 policy
+        before evaluating complete captions. Default: the first 12 frozen
+        development images, E0/E1/E1-H/F4, one shared seed, 96 captions total.
+        It reports token drift, paired CHAIR/coverage/length, uncertainty, speed
+        and sampled operator profiles, then saves to Drive and releases the runtime.
+        It does not run smoke or select a winning TAS hypothesis. This small
+        comparison does not establish quality equivalence or approve the batch
+        policy for the complete study. The regular notebook still defaults to flow.
+        Existing CPU-prepared assets are reused; choose A100 and Run all.
+        """)
     markdown("""
     # TAS v7 — CPU preparation / A100 experiments
 
@@ -181,7 +195,8 @@ def build(
     PERSISTENT_ROOT = "/content/drive/MyDrive/TAS-Shared"
     LOCAL_ROOT = "/content/tas-v7-work"
     PHASE = "auto"             # auto / prepare / run / score / check
-    STAGE = {stage!r}          # audit = short performance check; flow = complete study
+    STAGE = {stage!r}          # flow = complete study; batch_compare = paired execution check; audit = P0 only
+    COMPARISON_IMAGES = 12    # fixed A prefix; used only by batch_compare
     MAX_SESSION_MINUTES = 180  # planned stop; run again to resume without changing the experiment
     SEEDS = [0, 1, 2]
     REQUIRE_A100_80GB = False   # supports your A100 40 GB; True enforces at least 80 GB
@@ -287,6 +302,7 @@ def build(
         "persistent_root":PERSISTENT_ROOT, "local_root":LOCAL_ROOT, "stage":STAGE,
         "seeds":SEEDS, "methods":METHODS, "batch_sizes":BATCH_SIZES,
         "attention_backends":ATTENTION_BACKENDS, "last_position_logits":LAST_POSITION_LOGITS,
+        "comparison_images":COMPARISON_IMAGES,
         "max_session_minutes":MAX_SESSION_MINUTES, "require_a100":REQUIRE_A100_80GB,
         "run_confirmation":RUN_CONFIRMATION, "run_controls":RUN_CONTROLS,
         "run_diagnostics":RUN_DIAGNOSTICS, "run_final":RUN_FINAL_REMAINDER,
@@ -386,6 +402,21 @@ def build(
             operators = run_dir / "audit/operators.txt"
             if operators.exists():
                 display(HTML("<details><summary>Short operator profile (diagnostic timings)</summary><pre>" + html.escape(operators.read_text()) + "</pre></details>"))
+        for comparison in sorted(run_dir.glob("batch-comparison-*/comparison.json")):
+            value = json.loads(comparison.read_text())
+            display(Markdown("**Paired execution comparison — descriptive only**"))
+            display(Markdown("Reference: `" + json.dumps(value["reference_policy"]) + "`  Candidate: `" + json.dumps(value["candidate_policy"]) + "`"))
+            cells = [("Method", "Mode", "Pairs", "Exact tokens", "Speedup", "CHAIRi delta", "CHAIRs delta", "Coverage delta", "Word length delta")]
+            for item in value["summary"]:
+                cells.append((item["method"], item["generation_mode"], item["n_pairs"], item["exact_token_match_rate"], item["speedup"], item["CHAIRi_delta"], item["CHAIRs_delta"], item["category_coverage_delta"], item["length_words_delta"]))
+            show_table(cells)
+            display(Markdown(value["interpretation"] + " Full intervals and diagnostics: `" + str(comparison) + "`"))
+            changed = comparison.parent / "changed-captions.jsonl"
+            if changed.exists():
+                examples = [json.loads(line) for line in changed.read_text().splitlines() if line][:12]
+                show_table([("Image", "Method", "Reference caption", "Batched caption")] + [(item["image_id"], item["method"], item["reference_caption"], item["candidate_caption"]) for item in examples])
+            for operators in sorted(comparison.parent.glob("profile-*/operators.txt")):
+                display(HTML("<details><summary>Sampled " + html.escape(operators.parent.name) + " operator profile</summary><pre>" + html.escape(operators.read_text()) + "</pre></details>"))
         for summary in sorted(run_dir.glob("*/summary.csv")):
             rows = list(csv.reader(summary.open()))
             display(Markdown("**" + summary.parent.name + "**"))
@@ -415,7 +446,7 @@ def build(
                 "name": "python3",
             },
             "language_info": {"name": "python", "version": "3"},
-            "colab": {"name": "TAS_v7_Colab.ipynb", "provenance": []},
+            "colab": {"name": "TAS_v7_Batch_Compare.ipynb" if stage == "batch_compare" else "TAS_v7_Colab.ipynb", "provenance": []},
         },
         "nbformat": 4,
         "nbformat_minor": 4,
@@ -425,8 +456,8 @@ def build(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit")
-    parser.add_argument("--output", default="notebooks/TAS_v7_Colab.ipynb")
-    parser.add_argument("--stage", choices=("flow", "audit"), default="flow")
+    parser.add_argument("--output")
+    parser.add_argument("--stage", choices=("flow", "audit", "batch_compare"), default="flow")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     commit = subprocess.check_output(
@@ -435,7 +466,10 @@ def main():
         text=True,
     ).strip()
     notebook = build(commit, source_package=package_from_commit(root, commit), stage=args.stage)
-    path = root / args.output
+    path = root / (args.output or (
+        "notebooks/TAS_v7_Batch_Compare.ipynb" if args.stage == "batch_compare"
+        else "notebooks/TAS_v7_Colab.ipynb"
+    ))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(notebook, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"

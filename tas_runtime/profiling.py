@@ -23,8 +23,10 @@ def profile_call(call, directory, *, device):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     table_path = directory / "operators.txt"
+    operators_path = directory / "operators.json"
     result_path = directory / "profile.json"
     table_path.unlink(missing_ok=True)
+    operators_path.unlink(missing_ok=True)
     result_path.unlink(missing_ok=True)
     activities = [torch.profiler.ProfilerActivity.CPU]
     cuda = str(device).startswith("cuda")
@@ -40,6 +42,23 @@ def profile_call(call, directory, *, device):
                 atomic_json(result_path, {"status": "failed", "error": str(exc)})
                 raise
         averages = profiler.key_averages()
+        # Retain tiny synchronization/transfer operators even when large GEMMs
+        # push them out of the printed top twenty. No per-token instrumentation.
+        operators = [
+            {
+                "name": event.key,
+                "count": event.count,
+                "self_cpu_time_us": event.self_cpu_time_total,
+                "self_device_time_us": getattr(event, "self_device_time_total", 0.0),
+            }
+            for event in averages
+            if any(name in event.key.lower() for name in (
+                "item", "local_scalar", "synchronize", "memcpy", "nonzero",
+                "aten::cat", "aten::mm", "aten::addmm", "aten::bmm", "scaled_dot_product",
+                "multinomial",
+            ))
+        ]
+        atomic_json(operators_path, {"time_unit": "microseconds", "operators": operators})
         cpu_table = averages.table(sort_by="self_cpu_time_total", row_limit=20)
         cuda_table = (
             averages.table(sort_by="self_cuda_time_total", row_limit=20)
@@ -50,7 +69,7 @@ def profile_call(call, directory, *, device):
             + cpu_table + "\n\n" + cuda_table
         )
         result = {
-            "status": "complete", "table": "operators.txt",
+            "status": "complete", "table": "operators.txt", "operator_totals": "operators.json",
             "scope": "one warmed pilot-length call; no shape, stack or memory tracing",
             "throughput": "use unprofiled execution-policy pilot, not profiler timings",
         }

@@ -399,6 +399,18 @@ class Study:
                 "P3_P4_P5": "disabled",
             },
         }
+        if self.config.stage == "batch_compare":
+            # A comparison must not lock the full study's policy or share its
+            # experimental outputs, even when all formulas stay unchanged.
+            core["execution_comparison"] = {
+                "schema": "tas-batched-comparison-v1",
+                "images": self.config.comparison_images,
+                "methods": list(self.config.methods or ("E0", "E1", "E1-H", "F4")),
+                "batch_sizes": self.config.batch_sizes,
+                "execution": self.config.execution,
+                "attention_backends": self.config.attention_backends,
+                "pilot_tokens": self.config.pilot_tokens,
+            }
         # Git commit/platform paths do not change the scientific source hash;
         # packages/GPU model do matter when replaying a run on another machine.
         core["environment"].pop("git_commit", None)
@@ -579,6 +591,8 @@ class Study:
                 for key, value in (prepared_overrides or {}).items()
             },
         }
+        if stage.startswith("batch-compare-"):
+            identity["execution_protocol"] = "tas-batched-comparison-v1/" + stage.removeprefix("batch-compare-")
         stage_id = stage + "-" + canonical_hash(identity)[:12]
         destination = self.persistent_run / stage_id
         snapshots = destination / "snapshots"
@@ -765,6 +779,8 @@ class Study:
                                             "perception"
                                         ].metadata,
                                     }
+                                    if "execution_protocol" in identity:
+                                        payload["execution_protocol"] = identity["execution_protocol"]
                                     if scorer:
                                         payload = scorer.score(
                                             row["image_id"],
@@ -915,6 +931,11 @@ class Study:
 
         try:
             self.initialize()
+            if self.config.stage == "batch_compare":
+                from .batch_compare import run_batch_comparison
+
+                run_batch_comparison(self)
+                return self.finish("batch_comparison_complete")
             self.audit()
             stage = self.config.stage
             methods = initial_methods()

@@ -29,6 +29,12 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   study. `--stage audit` is an optional short diagnostic, not the default delivery.
   Its optional operator profile runs only after P0 and never supplies selection timings.
   Profiler unavailability must not suppress generation errors or display stale tables.
+- `TAS_v7_Batch_Compare.ipynb` is a separate descriptive execution comparison.
+  It keeps strict B=1 P0, evaluates batched token drift under its own run/ledger
+  identities, and never promotes a rejected policy into the full study.
+  Preserve method IDs and per-image RNG keys across both execution policies.
+  Compare complete captions on the predeclared A prefix; keep quality scores
+  out of execution-policy selection. No equivalence margin is approved.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
   Reuse screen samples in controls only with identical ordered inputs, methods,

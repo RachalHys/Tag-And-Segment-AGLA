@@ -98,6 +98,21 @@ def test_performance_notebook_stops_after_audit_and_keeps_flow_available():
     assert any("does not start the 420-caption" in cell["source"] for cell in notebook["cells"])
 
 
+def test_separate_batch_comparison_notebook_is_bounded_and_displays_paired_reports():
+    notebook = build("b" * 40, source_package=fixture_package("b" * 40), stage="batch_compare")
+    nbformat.validate(nbformat.from_dict(notebook))
+    for index, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] == "code":
+            ast.parse(cell["source"], filename=f"comparison-cell-{index}")
+    namespace = {}
+    exec(next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code"), namespace)
+    assert namespace["STAGE"] == "batch_compare"
+    assert namespace["COMPARISON_IMAGES"] == 12
+    assert namespace["AUTO_SHUTDOWN"] is True
+    assert any("96 captions total" in cell["source"] for cell in notebook["cells"])
+    assert any("comparison.json" in cell["source"] for cell in notebook["cells"])
+
+
 def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch):
     import json
     import os
@@ -119,6 +134,20 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
             "backend": "eager", "execution": "serial", "batch_images": 1,
             "status": "rejected",  # older reports have no head/memory/rate fields
         }]}))
+    comparison = tmp_path / "runs/aa/batch-comparison-fixture"
+    comparison.mkdir()
+    (comparison / "comparison.json").write_text(json.dumps({
+        "reference_policy": {"batch_images": 1}, "candidate_policy": {"batch_images": 4},
+        "summary": [{"method": "F4", "generation_mode": "sample", "n_pairs": 12,
+                     "exact_token_match_rate": 0.5, "speedup": 2.0,
+                     "CHAIRi_delta": 0.0, "CHAIRs_delta": 0.0,
+                     "category_coverage_delta": 0.0, "length_words_delta": 0.1}],
+        "interpretation": "descriptive only",
+    }))
+    (comparison / "changed-captions.jsonl").write_text(json.dumps({
+        "image_id": 1, "method": "F4", "reference_caption": "Original caption",
+        "candidate_caption": "Batched caption",
+    }) + "\n")
     notebook = build("d" * 40, source_package=fixture_package("d" * 40))
     cell = next(cell["source"] for cell in notebook["cells"] if "runs_root =" in cell["source"])
     output = []
@@ -128,6 +157,8 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
     })
     headings = [value for value in output if isinstance(value, str) and value.startswith("### Run")]
     assert headings == ["### Run `aa`", "### Run `dd`", "### Run `ee`"]
+    assert any("Paired execution comparison" in str(value) for value in output)
+    assert any("Batched caption" in str(value) for value in output)
 
 
 @pytest.fixture
