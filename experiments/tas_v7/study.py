@@ -249,6 +249,75 @@ def _scorer(data_root, rows):
     )
 
 
+def _caption_key(row, method_id, seed, mode):
+    return {
+        "id": row["id"],
+        "image_id": row["image_id"],
+        "method": method_id,
+        "seed": seed,
+        "mode": mode,
+        "query": row["query"],
+    }
+
+
+def _reuse_screen_records(ledger, identity, source):
+    """Copy exact screen samples into controls, never another trajectory's state."""
+    records, report = source
+    metadata = report.get("metadata", {})
+    previous = metadata.get("identity", {})
+    if (
+        identity["stage"] != "controls"
+        or previous.get("stage") != "screen"
+        or not metadata.get("complete")
+        or report.get("failures")
+        or previous.get("modes") not in (("sample",), ["sample"])
+        or identity["interventions"]
+        or previous.get("interventions")
+    ):
+        raise ArtifactError("Only complete, unmodified screen samples can seed controls.")
+    # Exact row ORDER is required: FP16 results can depend on batch companions,
+    # row positions and padding, even with independent per-image RNG streams.
+    for name in ("study", "rows", "generation", "seeds", "execution", "partial_batch"):
+        if canonical_hash(identity[name]) != canonical_hash(previous.get(name)):
+            raise ArtifactError(f"Screen/control reuse identity differs: {name}.")
+    source_methods = {method["id"]: method for method in previous["methods"]}
+    expected_keys = {
+        canonical_hash(_caption_key(row, method, seed, "sample"))
+        for row in previous["rows"]
+        for method in source_methods
+        for seed in previous["seeds"]
+    }
+    indexed = {
+        canonical_hash(
+            _caption_key(row, row["method"], row["seed"], row["generation_mode"])
+        ): row
+        for row in records
+    }
+    if (
+        set(indexed) != expected_keys
+        or len(records) != len(expected_keys)
+        or report.get("completed_outputs") != len(expected_keys)
+        or report.get("expected_outputs") != len(expected_keys)
+    ):
+        raise ArtifactError("Completed screen records are missing, duplicated or unexpected.")
+    if "sample" not in identity["modes"]:
+        return 0
+    matching_methods = {
+        method["id"] for method in identity["methods"]
+        if canonical_hash(method) == canonical_hash(source_methods.get(method["id"]))
+    }
+    source_stage = "screen-" + canonical_hash(previous)[:12]
+    copied = 0
+    for original in records:
+        if original["method"] not in matching_methods:
+            continue
+        key = _caption_key(original, original["method"], original["seed"], "sample")
+        if not ledger.completed(key):
+            ledger.record(key, {**original, "reused_from_stage": source_stage})
+            copied += 1
+    return copied
+
+
 class Study:
     def __init__(self, config: StudyConfig, project_root=None):
         self.config = config
@@ -472,6 +541,7 @@ class Study:
         seeds=None,
         modes=("sample",),
         prepared_overrides=None,
+        reuse_from=None,
     ):
         import torch
 
@@ -520,21 +590,12 @@ class Study:
             * sum(len(seeds) if mode == "sample" else 1 for mode in modes)
         )
 
-        def key_for(row, method, seed, mode):
-            return {
-                "id": row["id"],
-                "image_id": row["image_id"],
-                "method": method.id,
-                "seed": seed,
-                "mode": mode,
-                "query": row["query"],
-            }
-
         shared_cost = {
             "new_perception_seconds": 0.0,
             "cache_hits": 0,
             "images": 0,
             "feature_seconds": 0.0,
+            "new_generation_seconds": 0.0,
         }
         count_since_flush = 0
         completed_count = sum(
@@ -555,9 +616,15 @@ class Study:
                     for row in ledger.records(latest=True)
                     if row["status"] == "ok"
                 ], report
+        if reuse_from is not None:
+            copied = _reuse_screen_records(ledger, identity, reuse_from)
+            if copied:
+                publish_ledger(ledger, snapshots)
+                completed_count += copied
+                print(f"{stage}: reused {copied} exact sampled captions from screen.", flush=True)
         scorer = (
             _scorer(self.work["data_root"], rows)
-            if self.config.dataset == "coco"
+            if self.config.dataset == "coco" and completed_count < expected
             else None
         )
         bar = progress(total=expected, initial=completed_count, desc=stage, unit="caption")
@@ -578,7 +645,7 @@ class Study:
                             for seed in seeds if mode == "sample" else (seeds[0],):
                                 if any(
                                     not ledger.completed(
-                                        key_for(row, method, seed, mode)
+                                        _caption_key(row, method.id, seed, mode)
                                     )
                                     for row in batch
                                 ):
@@ -620,7 +687,7 @@ class Study:
                         bar.set_postfix_str(
                             f"{method.id} {mode} B={len(batch)} {last_timing}"
                         )
-                        keys = [key_for(row, method, seed, mode) for row in batch]
+                        keys = [_caption_key(row, method.id, seed, mode) for row in batch]
                         attempts = max(
                             (ledger.latest(key) or {}).get("attempt", 0)
                             for key in keys
@@ -646,6 +713,7 @@ class Study:
                                 result.token_ids = result.token_ids[:len(batch)]
                                 result.stop_reasons = result.stop_reasons[:len(batch)]
                                 elapsed = result.prefill_seconds + result.decode_seconds
+                                shared_cost["new_generation_seconds"] += elapsed
                                 for row, item, key, tokens, reason in zip(
                                     batch,
                                     prepared,
@@ -665,6 +733,7 @@ class Study:
                                         "id": row["id"],
                                         "image_id": row["image_id"],
                                         "query_id": row["id"],
+                                        "query": row["query"],
                                         "image": row["image"],
                                         "caption": caption,
                                         "response": caption,
@@ -752,7 +821,7 @@ class Study:
                 metadata={
                     "shared_stage_cost": shared_cost,
                     "identity": identity,
-                    "shared_stage_cost_scope": "current session only; historical per-image uncached perception timings remain in result metadata",
+                    "shared_stage_cost_scope": "current session only; new_generation_seconds sums returned decoder calls; reused rows retain their original measured timings",
                     "complete": len(records) == expected and not failed,
                 },
                 bootstrap_repeats=self.config.bootstrap_replicates,
@@ -780,7 +849,7 @@ class Study:
             self.perception.close()
             self.perception = None
 
-    def _run_controls(self, baselines, finalists):
+    def _run_controls(self, baselines, finalists, *, screen=None):
         """Run development ablations and temperature baselines for finalists."""
         from .methods import build_controls, harmonized_baselines
 
@@ -833,6 +902,7 @@ class Study:
             baselines + finalists + controls,
             seeds=(self.config.seeds[0],),
             modes=("sample", "greedy"),
+            reuse_from=screen,
         )
 
     def run(self):
@@ -866,7 +936,7 @@ class Study:
                 return self.finish("audit_complete")
             if stage in {"flow", "screen"}:
                 screen_methods = methods + harmonized_baselines()
-                screen, _ = self.collection(
+                screen, screen_report = self.collection(
                     "screen",
                     self.rows("B"),
                     screen_methods,
@@ -922,7 +992,10 @@ class Study:
                     modes=("sample", "greedy"),
                 )
             if stage in {"flow", "controls"} and self.config.run_controls:
-                self._run_controls(baselines, finalists)
+                self._run_controls(
+                    baselines, finalists,
+                    screen=(screen, screen_report) if stage == "flow" else None,
+                )
             if stage in {"flow", "diagnostics"} and self.config.run_diagnostics:
                 from .study_diagnostics import run_diagnostics
 

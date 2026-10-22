@@ -55,7 +55,8 @@ def summarize(records):
         p50_amortized_seconds_per_image=float(np.percentile(elapsed, 50)),
         p95_amortized_seconds_per_image=float(np.percentile(elapsed, 95)),
         peak_memory_bytes=max(row.get("peak_memory_bytes", 0) for row in records),
-        cost_scope="warm decoder prefill+decode; CLIP features, perception, storage and setup reported separately",
+        reused_captions=sum("reused_from_stage" in row for row in records),
+        cost_scope="measured warm decoder prefill+decode; reused captions retain original timings; current-session execution, features, perception, storage and setup reported separately",
         latency_scope="elapsed prefill+decode until the whole image batch returns; no queue/setup/perception time",
     )
     return result
@@ -212,6 +213,8 @@ def write_report(
 ):
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
+    metadata = dict(metadata or {})
+    metadata["reused_outputs"] = sum("reused_from_stage" in row for row in records)
     summary = grouped_summary(records)
     paired = []
     equal_length = []
@@ -278,7 +281,7 @@ def write_report(
         "failures": list(failures),
         "expected_outputs": expected,
         "completed_outputs": len(records),
-        "metadata": metadata or {},
+        "metadata": metadata,
         "limitations": [
             "COCO annotation scope is incomplete; inspect ambiguous mentions.",
             "CHAIR/category coverage/length do not establish caption quality or relations.",
@@ -294,6 +297,7 @@ def write_report(
         "protocol",
         "generation_mode",
         "n_captions",
+        "reused_captions",
         "CHAIRi",
         "CHAIRs",
         "category_coverage",

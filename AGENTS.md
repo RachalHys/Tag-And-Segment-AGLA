@@ -31,6 +31,9 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   Profiler unavailability must not suppress generation errors or display stale tables.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
+  Reuse screen samples in controls only with identical ordered inputs, methods,
+  seeds and execution settings. Retain source provenance and measured costs;
+  report reused outputs separately from new generation.
 - Freeze the shortlist coverage rule before outputs: the approved default is
   at most two absolute percentage points of loss versus E1-H; never force a finalist.
 - Keep models, datasets, caches, results and delivery bundles out of Git.

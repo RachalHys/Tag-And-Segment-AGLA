@@ -66,6 +66,12 @@ two finalists -> confirmation (300, three seeds plus greedy) -> development
 controls -> P0-D diagnostics (75 images). Final remainder is opt-in. P3/P4/P5, FG-G,
 hidden interventions and a second backbone are deferred.
 
+Full flow reuses matching sampled baseline/finalist captions from screening in
+controls. It requires identical ordered images, methods, seeds, generation and
+execution identities. Greedy and modified controls run independently. Reports
+mark reused captions, retain their original measured costs and separate new
+decoder time in stage metadata.
+
 The approved shortlist rule permits **at most two percentage points of measured
 coverage loss** versus harmonized TAG (`COVERAGE_TOLERANCE_PP=2.0`, absolute
 fraction 0.02). It requires an observed CHAIRi or

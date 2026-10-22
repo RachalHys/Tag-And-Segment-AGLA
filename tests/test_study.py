@@ -355,3 +355,233 @@ def test_partial_batch_keeps_locked_shape_without_padding_results(study, monkeyp
         assert row["actual_batch_images"] == 1
         assert row["execution_batch_images"] == 2
         assert row["padding_images"] == 1
+
+
+def test_full_flow_reuses_screen_samples_in_controls(study, monkeypatch):
+    from dataclasses import replace
+    import shutil
+
+    from experiments.tas_v7 import audit, report
+
+    run, rows = study
+    run.config = replace(run.config, run_confirmation=False, run_diagnostics=False)
+    monkeypatch.setattr(run, "initialize", lambda: run)
+    monkeypatch.setattr(run, "audit", lambda: None)
+    monkeypatch.setattr(run, "rows", lambda cohort: rows)
+    # Selection itself has separate scientific tests. Fix a finalist here to
+    # exercise the actual full controls collection with the miniature model.
+    monkeypatch.setattr(
+        report, "select_finalists", lambda *args, **kwargs: {"selected": ["F4"]}
+    )
+    baseline_ids = {"E0", "E1", "F0", "E0-H", "E1-H", "F4"}
+    active_stage, saved, calls = None, {}, []
+    collection, generate = run.collection, audit.generate
+
+    def observed_collection(stage, *args, **kwargs):
+        nonlocal active_stage
+        active_stage = stage
+        result = collection(stage, *args, **kwargs)
+        saved[stage] = result
+        return result
+
+    def observed_generate(*args, **kwargs):
+        method = args[2]
+        if active_stage == "controls" and method.id in baseline_ids:
+            assert kwargs.get("greedy"), (
+                "Controls regenerated an already completed screen sample"
+            )
+        calls.append((active_stage, method.id, kwargs.get("greedy")))
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(run, "collection", observed_collection)
+    monkeypatch.setattr(audit, "generate", observed_generate)
+    assert run.run()["status"] == "complete_first_round"
+    screen = {(row["image_id"], row["method"]): row for row in saved["screen"][0]}
+    controls, controls_report = saved["controls"]
+    reused = [row for row in controls if "reused_from_stage" in row]
+    assert (
+        len(reused)
+        == controls_report["metadata"]["reused_outputs"]
+        == len(rows) * len(baseline_ids)
+    )
+    for row in reused:
+        expected = screen[(row["image_id"], row["method"])]
+        assert row == {**expected, "reused_from_stage": row["reused_from_stage"]}
+        assert row["reused_from_stage"] == Path(run.stage_reports["screen"]).parent.name
+    assert any(stage == "controls" and greedy for stage, _, greedy in calls)
+    assert any(stage == "controls" and method.endswith("_BLACK") for stage, method, _ in calls)
+    assert any(stage == "temperature-1.0" for stage, _, _ in calls)
+    before = len(calls)
+    shutil.rmtree(run.local_run)
+    run.ledgers = []  # restore every stage from verified Drive snapshots
+    assert run.run()["status"] == "complete_first_round"
+    assert len(calls) == before  # completed controls, imports and reports resume
+
+
+def test_screen_reuse_avoids_all_generation_and_preserves_science(study, monkeypatch):
+    from experiments.tas_v7.cli import score_saved
+
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    source = run.collection("screen", rows, methods, seeds=(0,))
+    reference, _ = run.collection("controls-reference", rows, methods, seeds=(0,))
+    assert [row["token_ids"] for row in source[0]] == [
+        row["token_ids"] for row in reference
+    ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "Exact completed captions must not prepare features or generate again"
+        )
+
+    monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
+    monkeypatch.setattr(run, "prepare_rows", forbidden)
+    monkeypatch.setattr("experiments.tas_v7.study._scorer", forbidden)
+    reused, report = run.collection("controls", rows, methods, seeds=(0,), reuse_from=source)
+    assert len(reused) == report["metadata"]["reused_outputs"] == 6
+    assert report["metadata"]["shared_stage_cost"]["new_generation_seconds"] == 0
+    assert all(row["reused_captions"] == 2 for row in report["summary"])
+    for before, after in zip(source[0], reused):
+        assert after == {**before, "reused_from_stage": after["reused_from_stage"]}
+    assert sum(row["generation_seconds"] for row in report["summary"]) > 0
+    run.close()
+    report_path = Path(run.stage_reports["controls"])
+    report_path.unlink()
+    score_saved(run.config)
+    rebuilt = json.loads(report_path.read_text())
+    assert rebuilt["metadata"]["reused_outputs"] == 6
+    assert all(row["reused_captions"] == 2 for row in rebuilt["summary"])
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["study", "rows", "generation", "seeds", "execution", "partial_batch", "interventions"],
+)
+def test_screen_reuse_rejects_incompatible_inputs_before_inference(study, monkeypatch, field):
+    from copy import deepcopy
+
+    from tas_runtime.artifacts import ArtifactError
+
+    run, rows = study
+    methods = [method_by_id("E0")]
+    records, report = run.collection("screen", rows, methods, seeds=(0,))
+    report = deepcopy(report)
+    previous = report["metadata"]["identity"]
+    changes = {
+        "study": {"another_scientific_identity": 2},
+        "rows": previous["rows"][::-1],
+        "generation": {**previous["generation"], "temperature": 0.7},
+        "seeds": [1],
+        "execution": {**previous["execution"], "last_position_logits": False},
+        "partial_batch": "a different padding rule",
+        "interventions": {str(rows[0]["image_id"]): {"modified": True}},
+    }
+    previous[field] = changes[field]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Incompatible reuse must fail before inference")
+
+    monkeypatch.setattr(run, "prepare_rows", forbidden)
+    with pytest.raises(ArtifactError):
+        run.collection("controls", rows, methods, seeds=(0,), reuse_from=(records, report))
+    assert run.ledgers[-1][0].records() == []
+    run.close()
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["incomplete", "missing", "duplicate", "unexpected", "wrong_mode", "wrong_stage"],
+)
+def test_screen_reuse_rejects_invalid_source(study, problem):
+    from copy import deepcopy
+
+    from tas_runtime.artifacts import ArtifactError
+
+    run, rows = study
+    methods = [method_by_id("E0")]
+    records, report = deepcopy(run.collection("screen", rows, methods, seeds=(0,)))
+    if problem == "incomplete":
+        report["metadata"]["complete"] = False
+    elif problem == "missing":
+        records.pop()
+    elif problem == "duplicate":
+        records[-1] = records[0]
+    elif problem == "unexpected":
+        records[-1]["query"] = "another prompt"
+    elif problem == "wrong_mode":
+        report["metadata"]["identity"]["modes"] = ["greedy"]
+    elif problem == "wrong_stage":
+        report["metadata"]["identity"]["stage"] = "confirm"
+    with pytest.raises(ArtifactError):
+        run.collection("controls", rows, methods, seeds=(0,), reuse_from=(records, report))
+    assert run.ledgers[-1][0].records() == []
+    run.close()
+
+
+def test_changed_method_is_generated_instead_of_reusing_screen(study, monkeypatch):
+    from dataclasses import replace
+
+    from experiments.tas_v7 import audit
+
+    run, rows = study
+    method = method_by_id("F4")
+    source = run.collection("screen", rows, [method], seeds=(0,))
+    generate, calls = audit.generate, []
+
+    def observed_generate(*args, **kwargs):
+        calls.append(args[2].to_dict())
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "generate", observed_generate)
+    changed = replace(method, eta=0.6)
+    records, report = run.collection(
+        "controls", rows, [changed], seeds=(0,), reuse_from=source
+    )
+    assert calls == [changed.to_dict()]
+    assert report["metadata"]["reused_outputs"] == 0
+    assert not any("reused_from_stage" in row for row in records)
+    run.close()
+
+
+def test_interrupted_controls_restore_imports_and_successful_greedy_outputs(study, monkeypatch):
+    import shutil
+
+    from experiments.tas_v7 import audit
+
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "E1")]
+    source = run.collection("screen", rows, methods, seeds=(0,))
+    generate = audit.generate
+
+    def interrupted_generation(*args, **kwargs):
+        assert kwargs["greedy"]
+        if args[2].id == "E1":
+            raise KeyboardInterrupt("simulated session interruption")
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "generate", interrupted_generation)
+    with pytest.raises(KeyboardInterrupt, match="simulated session interruption"):
+        run.collection(
+            "controls", rows, methods, seeds=(0,),
+            modes=("sample", "greedy"), reuse_from=source,
+        )
+    assert len(run.ledgers[-1][0].records(latest=True)) == 6
+    shutil.rmtree(run.local_run)
+    run.ledgers = []
+    calls = []
+
+    def remaining_generation(*args, **kwargs):
+        assert kwargs["greedy"] and args[2].id == "E1"
+        calls.append(args[2].id)
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "generate", remaining_generation)
+    records, report = run.collection(
+        "controls", rows, methods, seeds=(0,),
+        modes=("sample", "greedy"), reuse_from=source,
+    )
+    assert calls == ["E1"]
+    assert len(records) == report["completed_outputs"] == report["expected_outputs"] == 8
+    assert report["metadata"]["reused_outputs"] == 4
+    assert all(row["attempt"] == 1 for row in run.ledgers[-1][0].records(latest=True))
+    run.close()
