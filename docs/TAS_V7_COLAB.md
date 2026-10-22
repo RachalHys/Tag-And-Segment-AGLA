@@ -34,8 +34,8 @@ remains unresolved; the report does not infer harmless rounding.
 
 Before looking at quality scores, it freezes the candidate with the higher
 sampled F4 token throughput in a warmed, up-to-48-token probe. It compares
-**12 frozen A development images × E0/E1/E1-H/F4 × one sampled seed × two policies
-= 96 complete captions**, with the normal EOS/180-token limit. Separate ledgers
+**4 frozen A development images × E0/E1/F4 × one sampled seed × two policies
+= 24 complete captions**, with the normal EOS/180-token limit. Separate ledgers
 retain the original method IDs/RNG keys. Results include paired CHAIR, coverage,
 length and image-bootstrap intervals, exact-token/caption rates, changed-caption
 examples, EOS/truncation rates, full-caption throughput and peak memory. CHAIRi
@@ -44,8 +44,14 @@ perception, feature preparation and profiling; the short probe does not promise
 full-stage speed. Sampled E0/F4 B=1 profiles save operator tables and explicit
 scalar-read, synchronization, transfer, matrix-multiply and attention totals.
 
+The notebook uses a **20-minute cooperative study budget**, including local
+asset restoration and model loading. Environment installation is additional.
+The budget is checked between calls and saves completed work; it cannot interrupt
+an active model call or file operation. A fresh runtime still copies the cached
+weights from Drive, so no few-minute total-runtime promise is made.
+
 This is a **descriptive pilot**, not a test establishing equivalence. One seed
-and 12 already-inspected development images cannot validate all 14 methods or
+and four already-inspected development images cannot validate all 14 methods or
 held-out quality. A confidence interval containing zero is not equivalence.
 The two-point shortlist coverage rule supplies no execution-equivalence margin.
 No rejected policy is promoted to strict P0 or automatically used in full flow.

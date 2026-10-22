@@ -146,14 +146,18 @@ def build(
         **Batched execution comparison:** this notebook defaults to
         `STAGE="batch_compare"`. It keeps strict P0 for a serial B=1 reference,
         measures serial and packed B=4, then freezes the faster sampled F4 policy
-        before evaluating complete captions. Default: the first 12 frozen
-        development images, E0/E1/E1-H/F4, one shared seed, 96 captions total.
+        before evaluating complete captions. Default: the first 4 frozen
+        development images, E0/E1/F4, one shared seed, 24 captions total.
         It reports token drift, paired CHAIR/coverage/length, uncertainty, speed
         and sampled operator profiles, then saves to Drive and releases the runtime.
         It does not run smoke or select a winning TAS hypothesis. This small
         comparison does not establish quality equivalence or approve the batch
         policy for the complete study. The regular notebook still defaults to flow.
         Existing CPU-prepared assets are reused; choose A100 and Run all.
+        The study has a 20-minute cooperative budget, checked between calls;
+        unfinished work is saved. Environment installation is additional and
+        a fresh runtime must still restore and load the model. This is a quick
+        bottleneck/drift investigation, not evidence of quality equivalence.
         """)
     markdown("""
     # TAS v7 — CPU preparation / A100 experiments
@@ -196,8 +200,8 @@ def build(
     LOCAL_ROOT = "/content/tas-v7-work"
     PHASE = "auto"             # auto / prepare / run / score / check
     STAGE = {stage!r}          # flow = complete study; batch_compare = paired execution check; audit = P0 only
-    COMPARISON_IMAGES = 12    # fixed A prefix; used only by batch_compare
-    MAX_SESSION_MINUTES = 180  # planned stop; run again to resume without changing the experiment
+    COMPARISON_IMAGES = {4 if stage == "batch_compare" else 12}    # fixed A prefix; used only by batch_compare
+    MAX_SESSION_MINUTES = {20 if stage == "batch_compare" else 180}  # cooperative study budget; environment setup is additional
     SEEDS = [0, 1, 2]
     REQUIRE_A100_80GB = False   # supports your A100 40 GB; True enforces at least 80 GB
     AUTO_SHUTDOWN = True       # flush Drive, then release runtime after this session's work
@@ -209,7 +213,7 @@ def build(
     DATASET = "coco"           # AMBER/POPE require STAGE=external and explicit verified manifests below
     EXTERNAL_MANIFEST = None
     EXTERNAL_IMAGE_ROOT = None
-    METHODS = []               # empty = exact initial 14; external runs should select frozen finalists explicitly
+    METHODS = {["E0", "E1", "F4"] if stage == "batch_compare" else []!r}  # comparison subset; empty = initial 14 for flow
     BATCH_SIZES = [1, 2, 4]     # image batches, including serial views; measured and checked before use
     ATTENTION_BACKENDS = ["eager", "sdpa"]
     LAST_POSITION_LOGITS = True

@@ -78,6 +78,8 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["BASELINE_COMMIT"] == BASE_COMMIT
     assert namespace["PHASE"] == "auto"
     assert namespace["STAGE"] == "flow"
+    assert namespace["METHODS"] == []
+    assert namespace["MAX_SESSION_MINUTES"] == 180
     assert namespace["SEEDS"] == [0, 1, 2]
     assert namespace["RUN_FINAL_REMAINDER"] is False
     assert namespace["AUTO_SHUTDOWN"] is True
@@ -107,10 +109,27 @@ def test_separate_batch_comparison_notebook_is_bounded_and_displays_paired_repor
     namespace = {}
     exec(next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code"), namespace)
     assert namespace["STAGE"] == "batch_compare"
-    assert namespace["COMPARISON_IMAGES"] == 12
+    assert namespace["COMPARISON_IMAGES"] == 4
+    assert namespace["METHODS"] == ["E0", "E1", "F4"]
+    assert namespace["MAX_SESSION_MINUTES"] == 20
     assert namespace["AUTO_SHUTDOWN"] is True
-    assert any("96 captions total" in cell["source"] for cell in notebook["cells"])
+    assert any("24 captions total" in cell["source"] for cell in notebook["cells"])
     assert any("comparison.json" in cell["source"] for cell in notebook["cells"])
+    from experiments.tas_v7.cli import plan
+    from tas_runtime.config import StudyConfig
+
+    config = StudyConfig.from_dict({
+        "persistent_root": namespace["PERSISTENT_ROOT"],
+        "stage": namespace["STAGE"],
+        "comparison_images": namespace["COMPARISON_IMAGES"],
+        "methods": namespace["METHODS"],
+        "batch_sizes": namespace["BATCH_SIZES"],
+        "max_session_minutes": namespace["MAX_SESSION_MINUTES"],
+    })
+    resolved = plan(config)
+    assert resolved["complete_captions"] == 24
+    assert resolved["budget_minutes_per_session"] == 20
+    assert config.generation.max_new_tokens == 180
 
 
 def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch):

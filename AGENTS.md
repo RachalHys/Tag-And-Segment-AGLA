@@ -35,6 +35,8 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   Preserve method IDs and per-image RNG keys across both execution policies.
   Compare complete captions on the predeclared A prefix; keep quality scores
   out of execution-policy selection. No equivalence margin is approved.
+  Keep its quick notebook defaults at 4 images, E0/E1/F4, 24 complete captions
+  and a 20-minute cooperative study budget; full-study defaults stay unchanged.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
   Reuse screen samples in controls only with identical ordered inputs, methods,

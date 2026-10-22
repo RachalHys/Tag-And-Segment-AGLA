@@ -68,8 +68,9 @@ def test_policy_context_restores_reference_after_failure(study):
     assert run.runtime.backend.last_position_logits is True
 
 
+@pytest.mark.parametrize("names, expected_pairs", [((), 8), (("E0", "E1", "F4"), 6)])
 def test_comparison_runs_full_captions_in_separate_ledgers_and_resumes(
-    study, monkeypatch
+    study, monkeypatch, names, expected_pairs
 ):
     from tas_runtime import profiling
     from experiments.tas_v7.study import SessionBudgetReached
@@ -83,6 +84,7 @@ def test_comparison_runs_full_captions_in_separate_ledgers_and_resumes(
         batch_sizes=(1, 2),
         attention_backends=("eager",),
         execution="auto",
+        methods=names,
     )
     monkeypatch.setattr(run, "rows", lambda cohort: rows)
     profiles = []
@@ -104,7 +106,7 @@ def test_comparison_runs_full_captions_in_separate_ledgers_and_resumes(
     with pytest.raises(SessionBudgetReached, match="pause after reference"):
         batch_compare.run_batch_comparison(run)
     assert len(run.ledgers) == 1
-    assert len(run.ledgers[0][0].records(latest=True)) == 8
+    assert len(run.ledgers[0][0].records(latest=True)) == expected_pairs
     # Recheck of strict P0 is tested above. Isolate resume here: frozen discovery
     # and successful B=1 captions must survive a stop before candidate generation.
     monkeypatch.setattr(run, "audit", lambda: None)
@@ -121,16 +123,13 @@ def test_comparison_runs_full_captions_in_separate_ledgers_and_resumes(
     report_path = next(run.persistent_run.glob("batch-comparison-*/comparison.json"))
     report = json.loads(report_path.read_text())
     assert report["status"] == "descriptive_only"
-    assert report["n_pairs"] == 8
+    assert report["n_pairs"] == expected_pairs
     assert report["reference_policy"]["batch_images"] == 1
     assert report["candidate_policy"]["batch_images"] == 2
     assert run.policy == report["reference_policy"]
-    assert set(item["method"] for item in report["summary"]) == {
-        "E0",
-        "E1",
-        "E1-H",
-        "F4",
-    }
+    assert set(item["method"] for item in report["summary"]) == set(
+        names or ("E0", "E1", "E1-H", "F4")
+    )
     outputs = {}
     for ledger, _ in run.ledgers:
         role = ledger.identity["execution_protocol"].rsplit("/", 1)[-1]
