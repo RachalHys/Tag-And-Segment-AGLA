@@ -23,6 +23,65 @@ else:
     )
 
 
+def run_logged(command, *, cwd=None, env=None, label="process", heartbeat_seconds=30):
+    """Forward child output through notebook stdout, including quiet-phase heartbeats."""
+    import codecs
+    import os
+    import selectors
+    import subprocess
+    import time
+
+    if heartbeat_seconds <= 0:
+        raise ValueError("heartbeat_seconds must be positive")
+    command = list(map(str, command))
+    started = time.monotonic()
+    print(f"[{label}] started", flush=True)
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    next_heartbeat = started + heartbeat_seconds
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                timeout = max(0, next_heartbeat - time.monotonic())
+                if selector.select(timeout):
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        print(decoder.decode(b"", final=True), end="", flush=True)
+                        break
+                    print(decoder.decode(chunk), end="", flush=True)
+                    next_heartbeat = time.monotonic() + heartbeat_seconds
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    print(
+                        f"\n[{label}] still running; elapsed {now - started:.0f}s",
+                        flush=True,
+                    )
+                    next_heartbeat = now + heartbeat_seconds
+        returncode = process.wait()
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+    print(f"\n[{label}] finished in {time.monotonic() - started:.1f}s", flush=True)
+
+
 def build(
     commit,
     repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.git",
@@ -134,7 +193,9 @@ def build(
         + "SOURCE_PACKAGE = "
         + repr(source_package)
         + "\n\n"
-        + inspect.getsource(restore_source_package),
+        + inspect.getsource(restore_source_package)
+        + "\n\n"
+        + inspect.getsource(run_logged),
         hidden=True,
     )
     markdown("""
@@ -219,9 +280,9 @@ def build(
     config_path = pathlib.Path("/content/tas-v7-config.json")
     config_path.write_text(json.dumps(configuration, indent=2))
     def run_phase(phase):
-        subprocess.run([str(python), "-m", "experiments.tas_v7.cli", "--config",str(config_path),"--phase",phase], cwd=checkout,env=env,check=True)
+        run_logged([str(python), "-u", "-m", "experiments.tas_v7.cli", "--config",str(config_path),"--phase",phase], cwd=checkout,env=env,label=phase)
     if DATASET == "amber":
-        subprocess.run([str(python), "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp"), "--amber"], cwd=checkout, env=env, check=True)
+        run_logged([str(python), "-u", "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp"), "--amber"], cwd=checkout, env=env, label="NLP preparation")
     run_phase("plan")
     """,
         release_on_error=True,
@@ -238,13 +299,16 @@ def build(
     stages. Per-image RNG makes retries/resume independent of job order. A
     rejected optimization is recorded; baseline failures block larger runs.
     Results use immutable chunks and perception caches use shards on Drive.
+    Child stdout/stderr is forwarded live to this cell. Quiet phases print an
+    elapsed-time heartbeat every 30 seconds; it indicates a running process,
+    not a measured percentage complete. Pilot checks and caption counts follow.
     """)
     code(
         """
     phase_started = time.perf_counter()
     if effective_phase == "prepare":
         # Small NLP assets enable the offline scientific fixtures first.
-        subprocess.run([str(python), "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp")], cwd=checkout, env=env, check=True)
+        run_logged([str(python), "-u", "-m", "tas_runtime.bootstrap", "--root", "/content/tas-v7-envs", "--nlp-root", str(persistent / "nlp")], cwd=checkout, env=env, label="NLP preparation")
         run_phase("check")
         run_phase("prepare")
         run_phase("score")

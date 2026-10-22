@@ -139,3 +139,107 @@ def test_failed_preflight_releases_runtime_and_preserves_failure(
     with pytest.raises(RuntimeError, match="preflight fixture failed"):
         exec(compile(cell, "failed-preflight-cell", "exec"), namespace)
     assert calls == (["check", "flush", "release"] if enabled else ["check"])
+
+
+def test_child_output_is_forwarded_before_exit_without_waiting_for_newline(tmp_path):
+    from contextlib import redirect_stdout
+    import io
+    import sys
+    from tools.build_colab_notebook import run_logged
+
+    marker = tmp_path / "release"
+
+    class NotebookOutput(io.StringIO):
+        def write(self, value):
+            result = super().write(value)
+            if "child-ready" in self.getvalue():
+                marker.touch()
+            return result
+
+    script = """
+import os, pathlib, sys, time
+os.write(1,b'child-ready')
+os.write(2,b' child-stderr\\n')
+deadline=time.monotonic()+5
+while not pathlib.Path(sys.argv[1]).exists():
+ if time.monotonic()>deadline: raise RuntimeError('output was not forwarded live')
+ time.sleep(.01)
+print('child-finished: ✓')
+"""
+    output = NotebookOutput()
+    with redirect_stdout(output):
+        run_logged([sys.executable, "-u", "-c", script, marker])
+    text = output.getvalue()
+    assert "child-stderr" in text
+    assert "child-finished: ✓" in text
+    assert "[process] finished" in text
+
+
+def test_quiet_child_shows_heartbeat_before_completion(tmp_path):
+    from contextlib import redirect_stdout
+    import io
+    import sys
+    from tools.build_colab_notebook import run_logged
+
+    marker = tmp_path / "release"
+
+    class NotebookOutput(io.StringIO):
+        def write(self, value):
+            result = super().write(value)
+            if "still running" in self.getvalue():
+                marker.touch()
+            return result
+
+    script = """
+import pathlib, sys, time
+deadline=time.monotonic()+5
+while not pathlib.Path(sys.argv[1]).exists():
+ if time.monotonic()>deadline: raise RuntimeError('heartbeat was not shown')
+ time.sleep(.01)
+"""
+    output = NotebookOutput()
+    with redirect_stdout(output):
+        run_logged(
+            [sys.executable, "-u", "-c", script, marker],
+            label="run", heartbeat_seconds=.02,
+        )
+    assert "[run] still running; elapsed" in output.getvalue()
+
+
+def test_streamed_child_error_remains_visible_and_propagates(capsys):
+    import subprocess
+    import sys
+    from tools.build_colab_notebook import run_logged
+
+    script = "import sys; print('fixture error',file=sys.stderr); sys.exit(3)"
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        run_logged([sys.executable, "-u", "-c", script])
+    assert error.value.returncode == 3
+    assert "fixture error" in capsys.readouterr().out
+
+
+def test_interrupted_output_forwarding_reaps_child(tmp_path):
+    from contextlib import redirect_stdout
+    import io
+    import os
+    import sys
+    from tools.build_colab_notebook import run_logged
+
+    pid_file = tmp_path / "pid"
+
+    class InterruptedNotebook(io.StringIO):
+        def write(self, value):
+            if "child-ready" in value:
+                raise KeyboardInterrupt
+            return super().write(value)
+
+    script = """
+import os, pathlib, sys, time
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+print('child-ready',flush=True)
+time.sleep(30)
+"""
+    with redirect_stdout(InterruptedNotebook()), pytest.raises(KeyboardInterrupt):
+        run_logged([sys.executable, "-u", "-c", script, pid_file])
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)

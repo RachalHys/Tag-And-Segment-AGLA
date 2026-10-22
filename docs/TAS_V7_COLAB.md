@@ -32,6 +32,11 @@ Setup and execution errors also flush Drive and request release before propagati
 Environment preflight output, including subprocess errors and labelled checks,
 is saved under `TAS-Shared/diagnostics/environment/` before release.
 
+The study cell forwards child stdout/stderr live, announces each phase and
+prints an elapsed-time heartbeat every 30 seconds during quiet work. Pilot
+checks and caption counts appear as they complete. A heartbeat means the child
+process is still running; it is not a percentage-complete or GPU-use claim.
+
 ## Experiment flow
 
 Blocking P0 -> smoke (30 images, 14 methods) -> screen (240, one seed) -> at most
