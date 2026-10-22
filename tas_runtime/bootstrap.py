@@ -87,32 +87,52 @@ def profile_identity(mode, project_root, with_perception):
     }
 
 
-def validate_environment(python, mode, *, with_perception=False):
+def validate_environment(python, mode, *, with_perception=False, log_path=None):
     script = """
-import json, importlib.metadata, sys
-import torch, torchvision, numpy, transformers, PIL, nltk, textblob, cv2, pycocotools
+import importlib, importlib.metadata, json, os, sys
+def step(message):
+ print('[preflight] '+message, flush=True)
+step('interpreter: '+sys.executable+' | '+sys.version)
+print(json.dumps({'python_paths':sys.path,'environment':{key:os.environ.get(key) for key in ('PYTHONPATH','PYTHONHOME','LD_LIBRARY_PATH','CUDA_VISIBLE_DEVICES')}}),flush=True)
+assert sys.version_info[:2]==(3,10), sys.version
 expected=json.loads(sys.argv[1])
+step('declared package versions')
 actual={key:importlib.metadata.version(key) for key in expected}
 assert actual==expected, (actual,expected)
-assert sys.version_info[:2]==(3,10), sys.version
+for name in ('torch','torchvision','numpy','transformers','PIL','nltk','textblob','cv2','pycocotools'):
+ step('import '+name)
+ module=importlib.import_module(name)
+ print(name+': '+str(getattr(module,'__version__',''))+' | '+str(getattr(module,'__file__','')),flush=True)
+import torch, torchvision
 assert torch.__version__.split('+')[0]=='2.4.1', torch.__version__
+assert torchvision.__version__.split('+')[0]=='0.19.1', torchvision.__version__
 if sys.argv[2]=='gpu':
+ step('CUDA availability and runtime version')
  assert torch.cuda.is_available(), 'GPU environment installed, but CUDA is unavailable.'
  assert torch.version.cuda=='12.1', torch.version.cuda
+ step('CUDA FP16 scaled dot-product attention')
  q=torch.randn(1,4,8,32,device='cuda',dtype=torch.float16)
  assert torch.isfinite(torch.nn.functional.scaled_dot_product_attention(q,q,q,is_causal=True)).all()
+ step('CUDA torchvision NMS')
  boxes=torch.tensor([[0.,0.,2.,2.],[0.,0.,1.,1.]],device='cuda')
  scores=torch.tensor([.9,.8],device='cuda')
  assert torchvision.ops.nms(boxes,scores,.5).numel()>0
  torch.cuda.synchronize()
 if sys.argv[3]=='yes':
- import ultralytics, mobile_sam, clip, timm
+ for name in ('ultralytics','mobile_sam','clip','timm'):
+  step('import '+name)
+  module=importlib.import_module(name)
+  print(name+': '+str(getattr(module,'__version__',''))+' | '+str(getattr(module,'__file__','')),flush=True)
+ import ultralytics
  assert ultralytics.__version__=='8.3.40', ultralytics.__version__
+step('passed')
 print(json.dumps({'python':sys.version,'torch':torch.__version__,'cuda':torch.version.cuda,'packages':actual}))
 """
-    result = subprocess.check_output(
+    print(f"Checking {mode} environment: {python}", flush=True)
+    result = subprocess.run(
         [
             str(python),
+            "-u",
             "-c",
             script,
             json.dumps(REQUIRED),
@@ -120,11 +140,26 @@ print(json.dumps({'python':sys.version,'torch':torch.__version__,'cuda':torch.ve
             "yes" if with_perception else "no",
         ],
         text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
-    return json.loads(result.strip().splitlines()[-1])
+    output = result.stdout or ""
+    if log_path is not None:
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output, encoding="utf-8")
+    print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    if result.returncode:
+        location = f"\nFull preflight log: {log_path}" if log_path else ""
+        raise RuntimeError(
+            f"Environment preflight failed (exit {result.returncode}).{location}\n{output}"
+        )
+    return json.loads(output.strip().splitlines()[-1])
 
 
-def ensure_environment(mode, root, project_root, *, with_perception=None):
+def ensure_environment(
+    mode, root, project_root, *, with_perception=None, diagnostics_dir=None
+):
     """Idempotently create a local, fingerprinted environment and import-check it."""
     root, project_root = Path(root).expanduser().resolve(), Path(project_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -133,11 +168,18 @@ def ensure_environment(mode, root, project_root, *, with_perception=None):
     directory = root / f"py310-{mode}-{canonical_hash(identity)[:12]}"
     python = directory / "bin/python"
     receipt = directory / "tas-profile.json"
+    log_path = (
+        Path(diagnostics_dir) / (directory.name + ".log")
+        if diagnostics_dir is not None
+        else directory / "preflight.log"
+    )
     if receipt.exists() and python.exists():
         try:
-            validate_environment(python, mode, with_perception=perception)
+            validate_environment(
+                python, mode, with_perception=perception, log_path=log_path
+            )
             return python
-        except (subprocess.CalledProcessError, ValueError, OSError):
+        except (RuntimeError, subprocess.CalledProcessError, ValueError, OSError):
             print(
                 "Environment validation failed; reinstalling the declared profile.",
                 flush=True,
@@ -188,7 +230,9 @@ def ensure_environment(mode, root, project_root, *, with_perception=None):
                 project_root / "requirements/colab-perception.txt",
             ]
         )
-    actual = validate_environment(python, mode, with_perception=perception)
+    actual = validate_environment(
+        python, mode, with_perception=perception, log_path=log_path
+    )
     freeze = subprocess.check_output(
         [uv, "pip", "freeze", "--python", str(python)], text=True
     )

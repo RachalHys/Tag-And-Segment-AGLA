@@ -195,7 +195,8 @@ def build(
     if effective_phase == "run" and not (persistent / "preparation.json").is_file():
         raise RuntimeError("Run this notebook once in a CPU runtime first. That downloads/persists models and data before A100 allocation.")
     from tas_runtime.bootstrap import ensure_environment
-    python = ensure_environment(mode, "/content/tas-v7-envs", checkout)
+    python = ensure_environment(mode, "/content/tas-v7-envs", checkout,
+                                diagnostics_dir=persistent / "diagnostics/environment")
     if DATASET == "amber":
         from tas_runtime.bootstrap import ensure_amber
         ensure_amber(python, "/content/tas-v7-envs", checkout)

@@ -25,6 +25,8 @@ require regenerating the latest unpublished output chunk.
 including after a planned budget stop. This uses Colab's official
 [`runtime.unassign()`](https://github.com/googlecolab/colabtools/blob/main/google/colab/runtime.py).
 Setup and execution errors also flush Drive and request release before propagating.
+Environment preflight output, including subprocess errors and labelled checks,
+is saved under `TAS-Shared/diagnostics/environment/` before release.
 
 ## Experiment flow
 

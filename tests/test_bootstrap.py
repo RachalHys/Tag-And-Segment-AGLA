@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 from tas_runtime.bootstrap import profile_identity, validate_environment
@@ -23,6 +24,45 @@ def test_actual_cpu_profile_imports():
     report = validate_environment(sys.executable, "cpu")
     assert report["packages"]["transformers"] == "4.35.2"
     assert report["torch"].split("+")[0] == "2.4.1"
+
+
+def test_failed_child_error_is_visible_and_persisted(tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    output = (
+        "[preflight] import torchvision\n"
+        "Traceback (most recent call last):\n"
+        "ImportError: fixture shared library is missing\n"
+    )
+
+    def fail(command, **kwargs):
+        assert command[1] == "-u"
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.STDOUT
+        return SimpleNamespace(returncode=1, stdout=output)
+
+    monkeypatch.setattr("tas_runtime.bootstrap.subprocess.run", fail)
+    log = tmp_path / "drive/diagnostics/environment/preflight.log"
+    with pytest.raises(
+        RuntimeError, match="fixture shared library is missing"
+    ) as error:
+        validate_environment("/managed/bin/python", "gpu", log_path=log)
+    assert str(log) in str(error.value)
+    assert log.read_text() == output
+    assert output in capsys.readouterr().out
+
+
+def test_cpu_preflight_labels_imports_and_records_interpreter(tmp_path):
+    if sys.version_info[:2] != (3, 10):
+        pytest.skip("The declared Colab interpreter is Python3.10.")
+    log = tmp_path / "preflight.log"
+    report = validate_environment(sys.executable, "cpu", log_path=log)
+    output = log.read_text()
+    assert sys.executable in output
+    assert "[preflight] import torch" in output
+    assert "[preflight] import torchvision" in output
+    assert "[preflight] passed" in output
+    assert report["packages"]["numpy"] == "1.26.4"
 
 
 def test_prepared_nlp_is_reused_offline_and_detects_resource_drift(
