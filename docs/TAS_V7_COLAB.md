@@ -5,12 +5,16 @@ launcher with a generated, compressed copy of those Python modules. It clones
 the fixed public baseline and restores the experiment modules automatically.
 Only the notebook needs to be uploaded to Colab.
 
-The current delivery starts with `STAGE="audit"` for the requested performance
-investigation. It runs P0, profiles one warmed 24-token F4 call, displays the
-execution table and stops before smoke. Use `STAGE="flow"` for the full study.
-The profile is diagnostic, adds overhead and never supplies policy-selection
-timings. CUDA-profiler unavailability is reported without changing P0.
-Generation errors during profiling still stop the run. Completed P0 evidence
+The notebook defaults to `STAGE="flow"` and runs the full implemented first-round
+study. P0 automatically selects and freezes a passing execution policy, then
+continues through smoke, screening and the eligible subsequent stages below.
+No manual execution-policy selection is needed. A session budget saves progress
+for the next Run all.
+
+`STAGE="audit"` is an optional short performance investigation. It runs P0,
+profiles one warmed 24-token F4 call and stops before smoke. Its profile never
+supplies policy-selection timings. CUDA-profiler unavailability is reported
+without changing P0; generation errors still stop the run. Completed P0 evidence
 is saved first, and each profile clears older operator tables.
 
 ## Run in Colab
@@ -21,6 +25,7 @@ is saved first, and each profile clears older operator tables.
    `MyDrive/TAS-Shared`.
 3. Select **A100 40 or 80 GB**, then **Run all** again. The notebook installs the GPU
    environment, restores files locally, loads one LLaVA runtime and runs P0.
+   With the default `STAGE="flow"`, a passing P0 continues into the study automatically.
 4. Run again after a session ends. Completed results and perception caches are
    reused. Keep the same persistent root in future idea notebooks.
 

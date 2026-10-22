@@ -25,8 +25,9 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   batches and failed-head alternatives; keep rejected options out of generation.
   Keep the selected batch shape on partial batches; padded rows cannot become
   scored results or change a real image's RNG stream.
-- Use `--stage audit` when building the short performance-check notebook. Its
-  optional operator profile runs only after P0 and never supplies selection timings.
+- Deliver the notebook with the default `STAGE="flow"` for the full implemented
+  study. `--stage audit` is an optional short diagnostic, not the default delivery.
+  Its optional operator profile runs only after P0 and never supplies selection timings.
   Profiler unavailability must not suppress generation errors or display stale tables.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
