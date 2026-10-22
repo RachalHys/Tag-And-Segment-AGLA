@@ -105,7 +105,7 @@ class LlavaBackend:
 
 
 @contextlib.contextmanager
-def legacy_sampler(model, project_root, *, enabled=True):
+def legacy_sampler(project_root, *, enabled=True):
     """Use the original sampler only for a scoped reference call, never at import."""
     from transformers.generation.utils import GenerationMixin
 
@@ -146,14 +146,15 @@ class LlavaRuntime:
     @classmethod
     def load(cls, paths, project_root, *, device="cuda:0", last_position_logits=True):
         from transformers import AutoTokenizer
+
+        from llava.constants import (
+            DEFAULT_IM_END_TOKEN,
+            DEFAULT_IM_START_TOKEN,
+            DEFAULT_IMAGE_PATCH_TOKEN,
+        )
         from llava.model.language_model.llava_llama import (
             LlavaConfig,
             LlavaLlamaForCausalLM,
-        )
-        from llava.constants import (
-            DEFAULT_IM_START_TOKEN,
-            DEFAULT_IM_END_TOKEN,
-            DEFAULT_IMAGE_PATCH_TOKEN,
         )
 
         if not torch.cuda.is_available():
@@ -205,12 +206,12 @@ class LlavaRuntime:
 
     def prompt(self, query, conv_mode="llava_v1"):
         from llava.constants import (
-            IMAGE_TOKEN_INDEX,
-            DEFAULT_IMAGE_TOKEN,
-            DEFAULT_IM_START_TOKEN,
             DEFAULT_IM_END_TOKEN,
+            DEFAULT_IM_START_TOKEN,
+            DEFAULT_IMAGE_TOKEN,
+            IMAGE_TOKEN_INDEX,
         )
-        from llava.conversation import conv_templates, SeparatorStyle
+        from llava.conversation import SeparatorStyle, conv_templates
         from llava.mm_utils import tokenizer_image_token
 
         if conv_mode not in conv_templates:
@@ -278,9 +279,7 @@ class LlavaRuntime:
         try:
             with (
                 torch.random.fork_rng(devices=devices),
-                legacy_sampler(
-                    self.model, self.project_root, enabled=object_view is not None
-                ),
+                legacy_sampler(self.project_root, enabled=object_view is not None),
             ):
                 torch.manual_seed(seed)
                 if devices:

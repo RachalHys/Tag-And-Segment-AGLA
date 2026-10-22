@@ -30,8 +30,7 @@ Setup and execution errors also flush Drive and request release before propagati
 
 Blocking P0 -> smoke (30 images, 14 methods) -> screen (240, one seed) -> at most
 two finalists -> confirmation (300, three seeds plus greedy) -> development
-controls -> P0-D diagnostics (75 images). This follows the owner's later override
-of the original smoke review pause. Final remainder is opt-in. P3/P4/P5, FG-G,
+controls -> P0-D diagnostics (75 images). Final remainder is opt-in. P3/P4/P5, FG-G,
 hidden interventions and a second backbone are deferred.
 
 The approved shortlist rule permits **at most two percentage points of measured
@@ -52,8 +51,8 @@ Reports retain failures, CHAIR, category coverage, length, timing scopes and
 paired image-bootstrap intervals and a descriptive exact-word-count paired
 comparison. Actual batch-return latency is separate from amortized seconds per
 image; older records without latency measurements report it as unavailable.
-Diagnostics use provisional annotation
-matches; they do not establish causal explanations or guaranteed oracle bounds.
+Diagnostics use provisional annotation matches; they do not establish causal
+explanations or guaranteed oracle bounds.
 Caption quality and ambiguous object mentions still need scientific review.
 
 ## Code and persistence

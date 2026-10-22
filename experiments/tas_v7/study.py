@@ -1,19 +1,14 @@
-"""Repository-backed, resumable v7 study for CPU preparation and one GPU.
-
-The automatic first-round flow is an explicit user override of the brief's
-original smoke-review pause. P0 correctness gates remain mandatory. Adaptive
-P3/P4/P5 and training are not enabled by this runner.
-"""
+"""Resumable first-round v7 study with blocking P0 checks and one GPU runtime."""
 
 from __future__ import annotations
 
 import dataclasses
 import json
 import os
-from pathlib import Path
 import shutil
 import time
 from collections import defaultdict
+from pathlib import Path
 
 from tas_runtime.artifacts import (
     ArtifactError,
@@ -56,9 +51,9 @@ def source_identity(project_root):
 
 def prepare(config: StudyConfig, *, models=True, cohorts=("A", "B", "C", "D")):
     """CPU phase. Fetch artifacts without constructing any CUDA model."""
-    from tas_runtime.assets import prepare_assets, download_verified, MODEL_SPECS
+    from tas_runtime.assets import MODEL_SPECS, download_verified, prepare_assets
     from tas_runtime.bootstrap import prepare_nlp
-    from tas_runtime.data import prepare_coco_data, POPE_URLS, pope_image_ids
+    from tas_runtime.data import POPE_URLS, pope_image_ids, prepare_coco_data
 
     root = Path(config.persistent_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -223,10 +218,10 @@ def restore_working_set(config):
     }
 
 
-def _groups_by_prompt_length(runtime, rows, conv_mode):
+def _groups_by_prompt_length(rows, prompts):
     buckets = defaultdict(list)
     for row in rows:
-        buckets[len(runtime.prompt(row["query"], conv_mode)[1])].append(row)
+        buckets[len(prompts[row["query"]][1])].append(row)
     return [group for _, group in sorted(buckets.items())]
 
 
@@ -266,10 +261,12 @@ class Study:
 
     def initialize(self):
         import torch
-        from tas_runtime.persistence import PersistentNpzCache
+
         from tas_runtime.perception import perception_identity
+        from tas_runtime.persistence import PersistentNpzCache
         from tas_runtime.profiling import environment_manifest
         from tas_runtime.runtime import LlavaRuntime
+
         from .evaluation import ChairLexicon
         from .methods import initial_methods
 
@@ -359,9 +356,10 @@ class Study:
 
     def perception_for(self, row):
         from PIL import Image
+
         from tas_runtime.perception import (
-            PerceptionRuntime,
             PerceptionResult,
+            PerceptionRuntime,
             perception_key,
         )
 
@@ -463,11 +461,13 @@ class Study:
         prepared_overrides=None,
     ):
         import torch
+
         from tas_runtime.decoding import record_seed
-        from tas_runtime.persistence import restore_ledger, publish_ledger
+        from tas_runtime.persistence import publish_ledger, restore_ledger
         from tas_runtime.profiling import synchronize
+
         from .audit import generate
-        from .prepared import prepare_feature_batch, method_features
+        from .prepared import method_features, prepare_feature_batch
         from .report import write_report
 
         seeds = tuple(self.config.seeds if seeds is None else seeds)
@@ -547,9 +547,13 @@ class Study:
                     if row["status"] == "ok"
                 ], report
         try:
-            for group in _groups_by_prompt_length(
-                self.runtime, rows, self.config.generation.conv_mode
-            ):
+            # Methods and seeds share immutable prompt text/IDs. KV state and
+            # generated prefixes remain independent in the decoder.
+            prompts = {
+                query: self.runtime.prompt(query, self.config.generation.conv_mode)
+                for query in dict.fromkeys(row["query"] for row in rows)
+            }
+            for group in _groups_by_prompt_length(rows, prompts):
                 for start in range(0, len(group), self.policy["batch_images"]):
                     batch = group[start : start + self.policy["batch_images"]]
                     pending = []
@@ -573,14 +577,9 @@ class Study:
                             item.update(override)
                     for name in costs:
                         shared_cost[name] += costs[name]
-                    ids = torch.stack(
-                        [
-                            self.runtime.prompt(
-                                row["query"], self.config.generation.conv_mode
-                            )[1]
-                            for row in batch
-                        ]
-                    ).to(self.runtime.device)
+                    ids = torch.stack([prompts[row["query"]][1] for row in batch]).to(
+                        self.runtime.device
+                    )
                     feature_start = time.perf_counter()
                     unique_methods = list(
                         {method.id: method for method, _, _ in pending}.values()
@@ -629,9 +628,7 @@ class Study:
                                 ):
                                     if ledger.completed(key):
                                         continue
-                                    text, _, stop = self.runtime.prompt(
-                                        row["query"], self.config.generation.conv_mode
-                                    )
+                                    text, _, stop = prompts[row["query"]]
                                     caption = self.runtime.decode_text(tokens, stop)
                                     if not caption:
                                         raise ValueError(
@@ -751,12 +748,66 @@ class Study:
             self.perception.close()
             self.perception = None
 
+    def _run_controls(self, baselines, finalists):
+        """Run development ablations and temperature baselines for finalists."""
+        from .methods import build_controls, harmonized_baselines
+
+        controls = []
+        for method in finalists:
+            controls += build_controls(method)
+            controls += [
+                dataclasses.replace(
+                    method, id=method.id + "_BLACK", control="black_context"
+                ),
+                dataclasses.replace(
+                    method, id=method.id + "_RANDOM", control="random_region"
+                ),
+                dataclasses.replace(
+                    method,
+                    id=method.id + "_CONTEXT_ONLY",
+                    fusion=method.fusion + "_context",
+                    views=("ORIG", method.context_view),
+                    control="context_only",
+                    context=method.context_view,
+                ),
+            ]
+        # Explicit temperature-only controls use native scores at matched
+        # generation budgets; configuration-specific temperature is stored.
+        for temperature in (0.7, 1.0, 1.3):
+            previous = self.config
+            self.config = dataclasses.replace(
+                previous,
+                generation=dataclasses.replace(
+                    previous.generation, temperature=temperature
+                ),
+            )
+            try:
+                temp_baselines = [
+                    dataclasses.replace(method, id=f"{method.id}_T{temperature}")
+                    for method in harmonized_baselines()
+                ]
+                self.collection(
+                    f"temperature-{temperature}",
+                    self.rows("B"),
+                    temp_baselines,
+                    seeds=(previous.seeds[0],),
+                    modes=("sample",),
+                )
+            finally:
+                self.config = previous
+        self.collection(
+            "controls",
+            self.rows("B"),
+            baselines + finalists + controls,
+            seeds=(self.config.seeds[0],),
+            modes=("sample", "greedy"),
+        )
+
     def run(self):
         from .methods import (
+            harmonized_baselines,
             initial_methods,
             method_by_id,
-            harmonized_baselines,
-            build_controls,
         )
         from .report import select_finalists
 
@@ -839,58 +890,7 @@ class Study:
                     modes=("sample", "greedy"),
                 )
             if stage in {"flow", "controls"} and self.config.run_controls:
-                controls = []
-                for method in finalists:
-                    controls += build_controls(method)
-                    controls += [
-                        dataclasses.replace(
-                            method, id=method.id + "_BLACK", control="black_context"
-                        ),
-                        dataclasses.replace(
-                            method, id=method.id + "_RANDOM", control="random_region"
-                        ),
-                        dataclasses.replace(
-                            method,
-                            id=method.id + "_CONTEXT_ONLY",
-                            fusion=method.fusion + "_context",
-                            views=("ORIG", method.context_view),
-                            control="context_only",
-                            context=method.context_view,
-                        ),
-                    ]
-                # Explicit temperature-only controls use native scores at matched
-                # generation budgets; configuration-specific temperature is stored.
-                for temperature in (0.7, 1.0, 1.3):
-                    previous = self.config
-                    self.config = dataclasses.replace(
-                        previous,
-                        generation=dataclasses.replace(
-                            previous.generation, temperature=temperature
-                        ),
-                    )
-                    try:
-                        temp_baselines = [
-                            dataclasses.replace(
-                                method, id=f"{method.id}_T{temperature}"
-                            )
-                            for method in harmonized_baselines()
-                        ]
-                        self.collection(
-                            f"temperature-{temperature}",
-                            self.rows("B"),
-                            temp_baselines,
-                            seeds=(previous.seeds[0],),
-                            modes=("sample",),
-                        )
-                    finally:
-                        self.config = previous
-                self.collection(
-                    "controls",
-                    self.rows("B"),
-                    baselines + finalists + controls,
-                    seeds=(self.config.seeds[0],),
-                    modes=("sample", "greedy"),
-                )
+                self._run_controls(baselines, finalists)
             if stage in {"flow", "diagnostics"} and self.config.run_diagnostics:
                 from .study_diagnostics import run_diagnostics
 

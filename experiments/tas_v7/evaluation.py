@@ -20,16 +20,15 @@ this behavior visible without changing the official accuracy/F1.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from functools import lru_cache
 import hashlib
 import json
-from pathlib import Path
 import re
+from collections import defaultdict
+from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
-
 
 CHAIR_SOURCE = "https://github.com/LisaAnne/Hallucination"
 POPE_SOURCE = "https://github.com/AoiDragon/POPE/blob/main/evaluate.py"
@@ -416,8 +415,6 @@ class CocoChairEvaluator:
             "instance_gt_categories": sorted(annotated),
             "evaluator_version": self.lexicon.version,
         }
-
-    score_caption = score
 
     def evaluate(
         self, records: Iterable[Mapping], *, caption_key: str = "caption"

@@ -3,16 +3,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
 from transformers import CLIPImageProcessor
 
-from tas_runtime.config import GenerationConfig, StudyConfig
-from tas_runtime.persistence import PersistentNpzCache
-from tas_runtime.perception import PerceptionResult
-from tas_runtime.runtime import LlavaRuntime
-from experiments.tas_v7.study import Study, SessionBudgetReached
 from experiments.tas_v7.methods import method_by_id
+from experiments.tas_v7.study import SessionBudgetReached, Study
+from tas_runtime.config import GenerationConfig, StudyConfig
+from tas_runtime.perception import PerceptionResult
+from tas_runtime.persistence import PersistentNpzCache
+from tas_runtime.runtime import LlavaRuntime
 
 
 class Tokenizer:
@@ -136,7 +136,16 @@ def test_real_tiny_multimodal_collection_resume_and_cpu_reports(study, monkeypat
 
     run, rows = study
     methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    original_prompt = run.runtime.prompt
+    prompt_queries = []
+
+    def prompt(query, conv_mode):
+        prompt_queries.append(query)
+        return original_prompt(query, conv_mode)
+
+    monkeypatch.setattr(run.runtime, "prompt", prompt)
     records, report = run.collection("smoke-fixture", rows, methods, seeds=(0,))
+    assert prompt_queries == ["Describe this image."]
     assert len(records) == 6
     assert report["completed_outputs"] == report["expected_outputs"] == 6
     assert all(
@@ -155,6 +164,7 @@ def test_real_tiny_multimodal_collection_resume_and_cpu_reports(study, monkeypat
     monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
     resumed, _ = run.collection("smoke-fixture", rows, methods, seeds=(0,))
     assert resumed == records
+    assert prompt_queries == ["Describe this image."]
     run.close()
     rescored = score_saved(run.config)
     assert rescored["count"] == 1
@@ -274,6 +284,7 @@ def test_automatic_flow_obeys_scientific_shortlist_before_dependent_stages(
     study, monkeypatch, improved
 ):
     from test_report import caption
+
     from experiments.tas_v7 import study_diagnostics
 
     run, rows = study

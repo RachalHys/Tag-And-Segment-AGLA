@@ -12,7 +12,7 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   miniature real LLaVA model and require no full checkpoints or GPU.
 - Generate the notebook with
   `python tools/build_colab_notebook.py --commit <implementation-commit>`.
-  The generated notebook packages that commit's private Python modules and
+  The generated notebook packages that commit's experiment Python modules and
   restores them over the pinned public baseline; no separate upload is needed.
 - Keep the P0 baseline, geometry, support and execution checks blocking. CPU
   fixtures do not establish full-checkpoint parity or A100 performance.

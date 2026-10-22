@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from tas_runtime.config import StudyConfig
 
@@ -28,7 +28,7 @@ def plan(config):
         "diagnostics": f"{config.diagnostic_count} images, E0/E1/one finalist, D-PRED/D-MASK/D-BOX/D-MISS; fixed-prefix probes",
         "budget_minutes_per_session": config.max_session_minutes,
         "resume": "completed image/method/seed/config records are reused across sessions",
-        "stage_flow": "automatic after blocking P0; smoke review pause overridden by owner",
+        "stage_flow": "blocking P0, then automatic first-round stages",
         "shortlist": {
             "coverage_baseline": "E1-H",
             "maximum_coverage_loss_percentage_points": 100 * config.coverage_tolerance,
@@ -48,17 +48,15 @@ def plan(config):
 
 
 def score_saved(config):
+    from tas_runtime.persistence import read_incremental_snapshot
+
     from .report import write_report
-    from tas_runtime.artifacts import canonical_hash
 
     root = Path(config.persistent_root).expanduser() / "runs"
-    from tas_runtime.persistence import read_incremental_snapshot
 
     outputs = []
     for pointer in sorted(root.glob("*/**/snapshots/ledger-index.json")):
         value = read_incremental_snapshot(pointer)
-        if canonical_hash(value["identity"]) != value["identity_hash"]:
-            raise RuntimeError(f"Snapshot identity mismatch: {pointer}")
         latest = {}
         for row in value["records"]:
             latest[row["key_hash"]] = row

@@ -7,8 +7,8 @@ Legacy E1 raw-before-processor masking is a distinct geometry contract.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -235,12 +235,6 @@ def processor_geometry_canvas(
         "normalization_applied": False,
     }
     return rgb, np.asarray(mask_image).astype(bool), metadata
-
-
-def black_image_control(image: Image.Image) -> Image.Image:
-    if image.mode != "RGB":
-        raise ValueError("Expected RGB")
-    return Image.new("RGB", image.size, (0, 0, 0))
 
 
 def area_matched_random_mask(mask: np.ndarray, rng: np.random.Generator) -> np.ndarray:

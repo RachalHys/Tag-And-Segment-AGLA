@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
-from pathlib import Path
 import subprocess
 import textwrap
+from pathlib import Path
 
 if __package__:
     from .notebook_delivery import (
@@ -33,7 +33,7 @@ def build(
         source_package["source_commit"] != commit
         or source_package["base_commit"] != BASE_COMMIT
     ):
-        raise ValueError("Notebook and private source identities differ.")
+        raise ValueError("Notebook and packaged source identities differ.")
     cells = []
 
     def markdown(source):
@@ -84,8 +84,7 @@ def build(
 
     Automatic flow: blocking P0 audit → 30-image smoke → 240-image screen →
     predeclared shortlist → confirmation (3 seeds + greedy) → controls → P0-D.
-    This implements the owner's explicit override of the earlier smoke review
-    pause. Final remainder and P3/P4/P5 remain disabled by default. A session
+    Final remainder and P3/P4/P5 remain disabled by default. A session
     budget saves progress; the next Run all continues completed stages.
     Shortlisting requires the predeclared coverage guard and a nondominated
     observed hallucination improvement. If none qualifies, the study saves its
@@ -162,7 +161,7 @@ def build(
     os.chdir(checkout)
     if str(checkout) not in sys.path:
         sys.path.insert(0, str(checkout))
-    # A new idea notebook may reuse this VM with different private modules.
+    # A new idea notebook may reuse this VM with different experiment modules.
     for module_name in list(sys.modules):
         if module_name == "tas_runtime" or module_name.startswith("tas_runtime."):
             del sys.modules[module_name]

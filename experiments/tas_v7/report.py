@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 import csv
 import io
 import math
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
 from tas_runtime.artifacts import atomic_json, atomic_jsonl
+
 from .evaluation import (
+    _pairing_key,
     aggregate_caption_metrics,
     paired_cluster_bootstrap,
-    _pairing_key,
 )
 
 
@@ -117,7 +118,7 @@ def select_finalists(records, *, count=2, coverage_tolerance=0.02):
         key=lambda row: (
             row["CHAIRi"],
             row["CHAIRs"],
-            -(row["category_coverage"] or 0),
+            -row["category_coverage"],
             -row["true_mentions"],
             row["method"],
         )
@@ -139,11 +140,11 @@ def select_finalists(records, *, count=2, coverage_tolerance=0.02):
         row["pareto_dominated"] = any(
             other["CHAIRi"] <= row["CHAIRi"]
             and other["CHAIRs"] <= row["CHAIRs"]
-            and (other["category_coverage"] or 0) >= (row["category_coverage"] or 0)
+            and other["category_coverage"] >= row["category_coverage"]
             and (
                 other["CHAIRi"] < row["CHAIRi"]
                 or other["CHAIRs"] < row["CHAIRs"]
-                or (other["category_coverage"] or 0) > (row["category_coverage"] or 0)
+                or other["category_coverage"] > row["category_coverage"]
             )
             for other in comparisons
             if other is not row
@@ -231,26 +232,17 @@ def write_report(
             comparison = equal_length_comparison(
                 by_group[(protocol, mode, baseline)], rows
             )
-            equal_length.append(
-                {
-                    "baseline_method": baseline,
-                    "candidate_method": method,
-                    "protocol": protocol,
-                    "mode": mode,
-                    **comparison,
-                }
-            )
         except ValueError as exc:
-            equal_length.append(
-                {
-                    "baseline_method": baseline,
-                    "candidate_method": method,
-                    "protocol": protocol,
-                    "mode": mode,
-                    "status": "unpaired",
-                    "reason": str(exc),
-                }
-            )
+            comparison = {"status": "unpaired", "reason": str(exc)}
+        equal_length.append(
+            {
+                "baseline_method": baseline,
+                "candidate_method": method,
+                "protocol": protocol,
+                "mode": mode,
+                **comparison,
+            }
+        )
         for metric in ("CHAIRi", "CHAIRs", "category_coverage", "length_words"):
             try:
                 result = paired_cluster_bootstrap(

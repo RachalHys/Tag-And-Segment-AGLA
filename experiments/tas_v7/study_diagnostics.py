@@ -7,25 +7,26 @@ region insertion requires separately verified input and is not invented here.
 
 from __future__ import annotations
 
-from collections import defaultdict
 import json
+from collections import defaultdict
 
 import numpy as np
 from PIL import Image
 
 from tas_runtime.artifacts import atomic_json, atomic_jsonl, canonical_hash, sha256_file
-from tas_runtime.perception import PerceptionRuntime, PerceptionResult
 from tas_runtime.decoding import forced_prefix_logits
+from tas_runtime.perception import PerceptionResult, PerceptionRuntime
+
 from .diagnostics import (
     InstanceEvidence,
-    inventory_audit,
     fixed_prefix_influence,
-    replace_same_instance_evidence,
+    inventory_audit,
     remove_verified_instance,
+    replace_same_instance_evidence,
 )
 from .evaluation import ChairLexicon
 from .methods import method_by_id
-from .prepared import prepare_image, prepare_feature_batch
+from .prepared import prepare_feature_batch, prepare_image
 
 
 def _box_iou(first, second):
@@ -98,6 +99,7 @@ def run_diagnostics(study, finalist=None):
         study.work["data_root"] / "scoring_annotations/instances_val2017.json"
     )
     source = json.loads(annotations_path.read_text())
+    annotations_sha256 = sha256_file(annotations_path)
     lexicon = ChairLexicon()
     categories = {
         item["id"]: lexicon.inverse[item["name"]] for item in source["categories"]
@@ -108,7 +110,7 @@ def run_diagnostics(study, finalist=None):
     audits, overrides = [], {"D-MASK": {}, "D-BOX": {}, "D-MISS": {}}
     for row in rows:
         study.check_budget()
-        prediction, original_key, cached = study.perception_for(row)
+        prediction, original_key, _ = study.perception_for(row)
         annotations = by_image[row["image_id"]]
         lookup = {item["id"]: item for item in annotations}
         matches = matched_annotation_instances(
@@ -162,7 +164,7 @@ def run_diagnostics(study, finalist=None):
             key = {
                 "base_perception": original_key,
                 "diagnostic": variant,
-                "annotations_sha256": sha256_file(annotations_path),
+                "annotations_sha256": annotations_sha256,
                 "matches": matches,
                 "version": "same-instance-provisional-v2",
             }
@@ -291,7 +293,7 @@ def run_diagnostics(study, finalist=None):
             "execution": study.policy,
             "methods": [method.to_dict() for method in methods],
             "rows": rows,
-            "annotation_sha256": sha256_file(annotations_path),
+            "annotation_sha256": annotations_sha256,
             "images": {
                 row["image"]: sha256_file(study.work["data_root"] / row["image"])
                 for row in rows
@@ -360,7 +362,7 @@ def run_diagnostics(study, finalist=None):
         {
             "cohort_size": len(rows),
             "methods": [method.id for method in methods],
-            "annotation_source_sha256": sha256_file(annotations_path),
+            "annotation_source_sha256": annotations_sha256,
             "perception_audit": "perception-audit.jsonl",
             "influence": "fixed-prefix-influence.jsonl",
             "probe_inputs": probe_inputs,

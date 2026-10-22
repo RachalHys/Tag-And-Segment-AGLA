@@ -5,8 +5,6 @@ from __future__ import annotations
 import importlib.metadata
 import platform
 import subprocess
-import time
-from contextlib import contextmanager
 
 
 def synchronize(device=None):
@@ -14,17 +12,6 @@ def synchronize(device=None):
 
     if torch.cuda.is_available() and (device is None or str(device).startswith("cuda")):
         torch.cuda.synchronize(device)
-
-
-@contextmanager
-def timed(target: dict, name: str, device=None):
-    synchronize(device)
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        synchronize(device)
-        target[name] = target.get(name, 0.0) + time.perf_counter() - start
 
 
 def environment_manifest():

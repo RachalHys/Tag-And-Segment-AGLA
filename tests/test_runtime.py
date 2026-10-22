@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from tas_runtime.runtime import LlavaBackend, legacy_sampler
+
+from experiments.tas_v7.methods import fuse_logits, method_by_id, plausibility_mask
 from tas_runtime.attention import set_attention_backend
 from tas_runtime.decoding import (
     DecodeOptions,
@@ -12,7 +13,7 @@ from tas_runtime.decoding import (
     forced_prefix_logits,
     record_seed,
 )
-from experiments.tas_v7.methods import fuse_logits, method_by_id, plausibility_mask
+from tas_runtime.runtime import LlavaBackend, legacy_sampler
 
 
 def inputs(batch=1):
@@ -50,9 +51,7 @@ def test_generation_reproduces_actual_legacy_sampler(model, identifier):
     seed = record_seed(0, 123, identifier)
     with (
         torch.random.fork_rng(),
-        legacy_sampler(
-            model, Path(__file__).resolve().parents[1], enabled=identifier == "E1"
-        ),
+        legacy_sampler(Path(__file__).resolve().parents[1], enabled=identifier == "E1"),
     ):
         torch.manual_seed(seed)
         reference = model.generate(

@@ -1,14 +1,14 @@
-"""Package committed private modules and restore them over the fixed public base."""
+"""Package committed experiment modules over the fixed public baseline."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 import io
-from pathlib import Path
 import subprocess
 import tarfile
 import zipfile
+from pathlib import Path
 
 BASE_COMMIT = "624f74501bdafe9b7d6a05ae739d12b422ce8737"
 SOURCE_PATHS = (
@@ -37,7 +37,7 @@ def package_from_commit(root, commit):
             if member.isdir():
                 continue
             if not member.isfile():
-                raise ValueError("Private source must contain regular files only.")
+                raise ValueError("Experiment source must contain regular files only.")
             contents[member.name] = source.extractfile(member).read()
     return _package_files(contents, resolved)
 
@@ -70,18 +70,18 @@ def restore_source_package(package, checkout, persistent, repo_url):
 
     This function is copied by the notebook generator so upload of the notebook
     alone is sufficient. Its authoritative source remains this Python module.
-    Existing baseline files cannot be replaced by the private package.
+    Existing baseline files cannot be replaced by the source package.
     """
     import base64
     import hashlib
     import io
     import json
     import os
-    from pathlib import Path
     import re
     import stat
     import subprocess
     import zipfile
+    from pathlib import Path
 
     if package.get("schema") != "tas-private-source-v1" or any(
         re.fullmatch(r"[a-f0-9]{40}", package.get(key, "")) is None
@@ -90,7 +90,7 @@ def restore_source_package(package, checkout, persistent, repo_url):
         raise ValueError("Invalid versioned source package.")
     data = base64.b85decode(package["archive_b85"])
     if hashlib.sha256(data).hexdigest() != package["sha256"]:
-        raise ValueError("Private source archive checksum mismatch.")
+        raise ValueError("Source archive checksum mismatch.")
     checkout, persistent = Path(checkout), Path(persistent)
     base = package["base_commit"]
 
@@ -116,18 +116,18 @@ def restore_source_package(package, checkout, persistent, repo_url):
         if len(members) != len(package["files"]) or {
             item.filename for item in members
         } != set(package["files"]):
-            raise ValueError("Private source file manifest mismatch.")
+            raise ValueError("Source file manifest mismatch.")
         if sum(item.file_size for item in members) > 8 * 1024**2:
-            raise ValueError("Private source package exceeds its code-only size limit.")
+            raise ValueError("Source package exceeds its code-only size limit.")
         contents = {}
         for item in members:
             if not owned_path(item.filename) or stat.S_IFMT(
                 item.external_attr >> 16
             ) not in {0, stat.S_IFREG}:
-                raise ValueError("Unsafe private source member.")
+                raise ValueError("Unsafe source member.")
             content = archive.read(item)
             if hashlib.sha256(content).hexdigest() != package["files"][item.filename]:
-                raise ValueError("Private source member checksum mismatch.")
+                raise ValueError("Source member checksum mismatch.")
             contents[item.filename] = content
     if not (checkout / ".git").exists():
         subprocess.run(
@@ -146,7 +146,7 @@ def restore_source_package(package, checkout, persistent, repo_url):
         )
         if baseline.returncode == 0:
             raise ValueError(
-                "Private delivery cannot overwrite a public baseline file: " + name
+                "Source package cannot overwrite a public baseline file: " + name
             )
     subprocess.run(["git", "checkout", "--detach", base], cwd=checkout, check=True)
     actual = subprocess.check_output(

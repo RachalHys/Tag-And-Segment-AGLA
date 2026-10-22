@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import time
+from dataclasses import replace
 
 import torch
 
@@ -15,8 +15,9 @@ from tas_runtime.decoding import (
     record_seed,
 )
 from tas_runtime.profiling import environment_manifest, synchronize
-from .methods import method_by_id, fuse_logits, plausibility_mask
-from .prepared import prepare_feature_batch, method_features, pixel_key
+
+from .methods import fuse_logits, method_by_id, plausibility_mask
+from .prepared import method_features, pixel_key, prepare_feature_batch
 
 
 def decode_options(runtime, config, method, *, greedy=False, max_new_tokens=None):
@@ -135,7 +136,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         "sampling": "per image/method/run generator, independent of job order; kernel changes can alter sampled captions",
         "status": "running",
     }
-    prompt, ids, _ = runtime.prompt(rows[0]["query"], config.generation.conv_mode)
+    _, ids, _ = runtime.prompt(rows[0]["query"], config.generation.conv_mode)
     ids = ids.unsqueeze(0).to(runtime.device)
     runtime.set_attention("eager")
     original_last = runtime.backend.last_position_logits
