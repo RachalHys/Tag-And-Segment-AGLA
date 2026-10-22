@@ -22,6 +22,8 @@ UV_VERSION = "0.8.22"
 REQUIRED = {
     "transformers": "4.35.2",
     "tokenizers": "0.15.2",
+    "sentencepiece": "0.2.0",
+    "protobuf": "4.25.9",
     "numpy": "1.26.4",
     "Pillow": "10.4.0",
     "nltk": "3.9.1",
@@ -105,7 +107,7 @@ expected=json.loads(sys.argv[1])
 step('declared package versions')
 actual={key:importlib.metadata.version(key) for key in expected}
 assert actual==expected, (actual,expected)
-for name in ('torch','torchvision','numpy','transformers','PIL','nltk','textblob','cv2','pycocotools','matplotlib.pyplot'):
+for name in ('torch','torchvision','numpy','transformers','sentencepiece','google.protobuf','PIL','nltk','textblob','cv2','pycocotools','matplotlib.pyplot'):
  step('import '+name)
  module=importlib.import_module(name)
  print(name+': '+str(getattr(module,'__version__',''))+' | '+str(getattr(module,'__file__','')),flush=True)
@@ -113,6 +115,10 @@ import torch, torchvision, matplotlib
 assert torch.__version__.split('+')[0]=='2.4.1', torch.__version__
 assert torchvision.__version__.split('+')[0]=='0.19.1', torchvision.__version__
 assert matplotlib.get_backend().lower()=='agg', matplotlib.get_backend()
+step('nonlegacy LLaMA tokenizer protobuf API')
+from transformers.convert_slow_tokenizer import import_protobuf
+model_proto=import_protobuf().ModelProto
+assert model_proto.FromString(model_proto().SerializeToString())==model_proto()
 if sys.argv[2]=='gpu':
  step('CUDA availability and runtime version')
  assert torch.cuda.is_available(), 'GPU environment installed, but CUDA is unavailable.'

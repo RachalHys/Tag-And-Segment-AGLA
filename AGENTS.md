@@ -8,6 +8,7 @@ the Colab notebook imports a fixed implementation commit. Keep the original
 - Use the isolated Python 3.10 profile in `tas_runtime.bootstrap` for this
   experiment. Do not install the legacy requirements into Colab's kernel.
   Set `MPLBACKEND=Agg` for managed subprocesses without changing the kernel.
+  Preserve the checkpoint's `legacy=False` tokenizer and its protobuf dependency.
 - Validate with `NLTK_DATA=/path/to/prepared/nlp python -m pytest tests -q` and
   `python -m compileall -q tas_runtime experiments tools tests`. Tests use a
   miniature real LLaVA model and require no full checkpoints or GPU.

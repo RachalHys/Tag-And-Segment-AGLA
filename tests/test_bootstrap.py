@@ -80,6 +80,36 @@ def test_cpu_preflight_handles_inherited_colab_backend(tmp_path, monkeypatch):
     assert child_env["CUDA_VISIBLE_DEVICES"] == "0"
 
 
+def test_nonlegacy_llama_tokenizer_loads_offline(tmp_path):
+    import sentencepiece
+    from transformers import AutoTokenizer, LlamaTokenizer
+
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text("Describe this image. A person stands beside a tree.\n" * 4)
+    prefix = tmp_path / "tiny"
+    sentencepiece.SentencePieceTrainer.train(
+        input=str(corpus),
+        model_prefix=str(prefix),
+        vocab_size=48,
+        hard_vocab_limit=False,
+        minloglevel=2,
+    )
+    # The pinned full checkpoint declares legacy=False, which needs protobuf.
+    tokenizer = LlamaTokenizer(vocab_file=str(prefix) + ".model", legacy=False)
+    directory = tmp_path / "tokenizer"
+    tokenizer.save_pretrained(directory)
+    restored = AutoTokenizer.from_pretrained(
+        directory, use_fast=False, local_files_only=True
+    )
+    assert restored.legacy is False
+    assert restored("Describe this image.").input_ids == tokenizer(
+        "Describe this image."
+    ).input_ids
+    assert restored("</s>", add_special_tokens=False).input_ids == [
+        restored.eos_token_id
+    ]
+
+
 def test_prepared_nlp_is_reused_offline_and_detects_resource_drift(
     tmp_path, monkeypatch
 ):

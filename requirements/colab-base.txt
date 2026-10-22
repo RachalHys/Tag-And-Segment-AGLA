@@ -5,6 +5,7 @@ huggingface-hub==0.25.2
 accelerate==0.24.1
 safetensors==0.4.5
 sentencepiece==0.2.0
+protobuf==4.25.9
 numpy==1.26.4
 Pillow==10.4.0
 opencv-python==4.10.0.84

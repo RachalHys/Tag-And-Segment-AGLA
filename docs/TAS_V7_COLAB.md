@@ -71,6 +71,8 @@ Caption quality and ambiguous object mentions still need scientific review.
 
 An isolated Python 3.10.16 subprocess uses Torch 2.4.1 / torchvision 0.19.1 and
 Transformers 4.35.2. Colab's kernel is left intact. Profiles are in `requirements/`;
+the pinned protobuf dependency supports the checkpoint's `legacy=False` tokenizer
+without changing its tokenization settings.
 CLIP builds with pinned setuptools and no build isolation. No external
 FlashAttention compilation is needed. Bootstrap checks and research workers use
 Matplotlib's file-only `Agg` backend so they do not inherit Colab's kernel-only
