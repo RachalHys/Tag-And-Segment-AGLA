@@ -14,6 +14,48 @@ def synchronize(device=None):
         torch.cuda.synchronize(device)
 
 
+def profile_call(call, directory, *, device):
+    """One diagnostic call; profiler timings never select the execution policy."""
+    from pathlib import Path
+    import torch
+    from .artifacts import atomic_json
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    cuda = str(device).startswith("cuda")
+    if cuda:
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    try:
+        with torch.profiler.profile(activities=activities) as profiler:
+            call()
+        averages = profiler.key_averages()
+        cpu_table = averages.table(sort_by="self_cpu_time_total", row_limit=20)
+        cuda_table = (
+            averages.table(sort_by="self_cuda_time_total", row_limit=20)
+            if cuda else "CUDA profiling was not requested."
+        )
+        (directory / "operators.txt").write_text(
+            "Profiler adds overhead; use unprofiled pilot for throughput.\n\n"
+            + cpu_table + "\n\n" + cuda_table
+        )
+        result = {
+            "status": "complete", "table": "operators.txt",
+            "scope": "one warmed pilot-length call; no shape, stack or memory tracing",
+            "throughput": "use unprofiled execution-policy pilot, not profiler timings",
+        }
+        print(cpu_table, flush=True)
+        if cuda:
+            print(cuda_table, flush=True)
+    except RuntimeError as exc:
+        # CUPTI can be unavailable in a hosted runtime. This diagnostic never
+        # bypasses or changes the independently completed P0 correctness gate.
+        result = {"status": "unavailable", "error": str(exc)}
+        print(f"Operator profiler unavailable: {exc}", flush=True)
+    atomic_json(directory / "profile.json", result)
+    return result
+
+
 def environment_manifest():
     import torch
 

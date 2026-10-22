@@ -17,6 +17,7 @@ from tas_runtime.artifacts import (
     sha256_file,
 )
 from tas_runtime.config import StudyConfig
+from tas_runtime.progress import progress, step
 
 
 class SessionBudgetReached(Exception):
@@ -164,9 +165,8 @@ def restore_working_set(config):
             raise RuntimeError(
                 f"Prepared {key} differs from this configuration. Run CPU prepare for the intended cohorts."
             )
-    assets = prepare_assets(
-        persistent / "assets"
-    )  # checks receipts, reuses verified files
+    with step("Check prepared model receipts"):
+        assets = prepare_assets(persistent / "assets")
     local.mkdir(parents=True, exist_ok=True)
     required = sum(
         item["size"]
@@ -180,22 +180,31 @@ def restore_working_set(config):
         raise RuntimeError(
             "Local runtime disk is too small for verified weights plus working data. Clear obsolete local sessions or choose a larger runtime disk."
         )
-    for name, spec in assets["assets"].items():
-        source_path = Path(assets["paths"][name])
-        directory = source_path if "repo_id" in spec else source_path.parent
-        relative = directory.relative_to(persistent / "assets")
-        for item in spec["files"]:
-            copy_verified(
-                directory / item["filename"],
-                local / "assets" / relative / item["filename"],
-                sha256=item["sha256"],
-            )
+    total_bytes = sum(
+        item["size"] for spec in assets["assets"].values() for item in spec["files"]
+    )
+    with step("Restore and verify models from Drive"), progress(
+        total=total_bytes, desc="Model files", unit="B", unit_scale=True,
+    ) as bar:
+        for name, spec in assets["assets"].items():
+            source_path = Path(assets["paths"][name])
+            directory = source_path if "repo_id" in spec else source_path.parent
+            relative = directory.relative_to(persistent / "assets")
+            for item in spec["files"]:
+                bar.set_postfix_str(name + "/" + item["filename"], refresh=False)
+                copy_verified(
+                    directory / item["filename"],
+                    local / "assets" / relative / item["filename"],
+                    sha256=item["sha256"], progress=bar.update,
+                )
     portable = {"schema": "tas-model-assets-v1", "assets": assets["assets"]}
     atomic_json(local / "assets/assets-manifest.json", portable)
     source_data = persistent / preparation["dataset_root_relative"]
     destination = local / "data" / "coco" / source_data.name
-    restore_dataset_bundle(persistent, local, destination, preparation["data_bundle"])
-    restore_nlp(persistent / "nlp", local / "nlp")
+    with step("Restore images and annotations"):
+        restore_dataset_bundle(persistent, local, destination, preparation["data_bundle"])
+    with step("Restore NLP resources"):
+        restore_nlp(persistent / "nlp", local / "nlp")
     os.environ["NLTK_DATA"] = str(local / "nlp")
     import nltk
 
@@ -286,12 +295,14 @@ class Study:
                 "This optimized study profile targets Ampere or newer; T4 needs a separately validated profile."
             )
         self.work = restore_working_set(self.config)
-        ChairLexicon().fixture_check()
-        self.runtime = LlavaRuntime.load(
-            self.work["paths"],
-            self.project_root,
-            last_position_logits=self.config.last_position_logits,
-        )
+        with step("Check evaluation resources"):
+            ChairLexicon().fixture_check()
+        with step("Load LLaVA and its vision encoder (FP16)"):
+            self.runtime = LlavaRuntime.load(
+                self.work["paths"],
+                self.project_root,
+                last_position_logits=self.config.last_position_logits,
+            )
         core = {
             "namespace": "tas-v7",
             "generation": dataclasses.asdict(self.config.generation),
@@ -370,9 +381,10 @@ class Study:
             return PerceptionResult.from_cache(value), key, True
         self.check_budget()
         if self.perception is None:
-            self.perception = PerceptionRuntime(
-                self.work["paths"], confidence=self.config.yolo_conf
-            )
+            with step("Load BLIP, YOLO, CLIP and MobileSAM for perception"):
+                self.perception = PerceptionRuntime(
+                    self.work["paths"], confidence=self.config.yolo_conf
+                )
         with Image.open(path) as source:
             image = source.convert("RGB")
         from tas_runtime.profiling import synchronize
@@ -386,28 +398,29 @@ class Study:
         self.cache.put(key, result.arrays(), result.metadata)
         return result, key, False
 
-    def prepare_rows(self, rows):
+    def prepare_rows(self, rows, *, label="Prepare views"):
         from .prepared import prepare_image
 
         output, elapsed, hits = [], 0.0, 0
-        for row in rows:
-            self.check_budget()
-            result, key, cached = self.perception_for(row)
-            item = prepare_image(
-                self.runtime,
-                self.work["data_root"] / row["image"],
-                result,
-                self.config,
-                random_seed=self.config.split_seed,
-            )
-            item.update(perception_key=key, perception=result)
-            elapsed += (
-                result.metadata.get("perception_seconds_uncached", 0.0)
-                if not cached
-                else 0.0
-            )
-            hits += cached
-            output.append(item)
+        with progress(rows, desc=label, unit="image", leave=False) as bar:
+            for row in bar:
+                self.check_budget()
+                result, key, cached = self.perception_for(row)
+                item = prepare_image(
+                    self.runtime,
+                    self.work["data_root"] / row["image"],
+                    result,
+                    self.config,
+                    random_seed=self.config.split_seed,
+                )
+                item.update(perception_key=key, perception=result)
+                elapsed += (
+                    result.metadata.get("perception_seconds_uncached", 0.0)
+                    if not cached
+                    else 0.0
+                )
+                hits += cached
+                output.append(item)
         return output, {
             "new_perception_seconds": elapsed,
             "cache_hits": hits,
@@ -418,7 +431,7 @@ class Study:
         from .audit import audit_and_pilot
 
         rows = self.rows("A")[: max(self.config.pilot_images, 2)]
-        prepared, perception_cost = self.prepare_rows(rows)
+        prepared, perception_cost = self.prepare_rows(rows, label="P0 views")
         # View gallery is actual RGB before normalization; tensor parity is also checked.
         from PIL import Image, ImageDraw
 
@@ -490,6 +503,7 @@ class Study:
             "generation": dataclasses.asdict(self.config.generation),
             "modes": modes,
             "execution": self.policy,
+            "partial_batch": "repeat-last-image; discard padded outputs",
             "interventions": {
                 str(key): value["metadata"]
                 for key, value in (prepared_overrides or {}).items()
@@ -546,6 +560,8 @@ class Study:
             if self.config.dataset == "coco"
             else None
         )
+        bar = progress(total=expected, initial=completed_count, desc=stage, unit="caption")
+        last_timing = ""
         try:
             # Methods and seeds share immutable prompt text/IDs. KV state and
             # generated prefixes remain independent in the decoder.
@@ -570,7 +586,7 @@ class Study:
                     if not pending:
                         continue
                     self.check_budget()
-                    prepared, costs = self.prepare_rows(batch)
+                    prepared, costs = self.prepare_rows(batch, label=f"{stage} views")
                     for row, item in zip(batch, prepared):
                         if prepared_overrides and row["image_id"] in prepared_overrides:
                             override = prepared_overrides[row["image_id"]]
@@ -587,11 +603,23 @@ class Study:
                     features = prepare_feature_batch(
                         self.runtime, prepared, unique_methods
                     )
+                    padding = self.policy["batch_images"] - len(batch)
+                    if padding:
+                        # Keep the P0-validated numerical shape, including a
+                        # short prompt-length bucket or a final partial batch.
+                        ids = torch.cat((ids, ids[-1:].expand(padding, -1)))
+                        features = {
+                            name: torch.cat((value, value[-1:].expand(padding, -1, -1)))
+                            for name, value in features.items()
+                        }
                     synchronize(self.runtime.device)
                     feature_seconds = time.perf_counter() - feature_start
                     shared_cost["feature_seconds"] += feature_seconds
                     for method, seed, mode in pending:
                         self.check_budget()
+                        bar.set_postfix_str(
+                            f"{method.id} {mode} B={len(batch)} {last_timing}"
+                        )
                         keys = [key_for(row, method, seed, mode) for row in batch]
                         attempts = max(
                             (ledger.latest(key) or {}).get("attempt", 0)
@@ -600,24 +628,23 @@ class Study:
                         )
                         for _ in range(attempts, self.config.max_retries):
                             try:
+                                image_seeds = [
+                                    record_seed(seed, row["image_id"], method.id, row["query"])
+                                    for row in batch
+                                ]
+                                image_seeds += [image_seeds[-1]] * padding
                                 result = generate(
                                     self.runtime,
                                     self.config,
                                     method,
                                     ids,
                                     method_features(features, method),
-                                    [
-                                        record_seed(
-                                            seed,
-                                            row["image_id"],
-                                            method.id,
-                                            row["query"],
-                                        )
-                                        for row in batch
-                                    ],
+                                    image_seeds,
                                     greedy=mode == "greedy",
                                     execution=self.policy["execution"],
                                 )
+                                result.token_ids = result.token_ids[:len(batch)]
+                                result.stop_reasons = result.stop_reasons[:len(batch)]
                                 elapsed = result.prefill_seconds + result.decode_seconds
                                 for row, item, key, tokens, reason in zip(
                                     batch,
@@ -660,6 +687,8 @@ class Study:
                                         / len(batch),
                                         "peak_memory_bytes": result.peak_memory_bytes,
                                         "actual_batch_images": len(batch),
+                                        "execution_batch_images": self.policy["batch_images"],
+                                        "padding_images": padding,
                                         "branches": result.branch_count,
                                         "view_metadata": item["metadata"],
                                         "perception_key": item["perception_key"],
@@ -682,6 +711,11 @@ class Study:
                                     ledger.record(key, payload)
                                     count_since_flush += 1
                                     completed_count += 1
+                                    bar.update(1)
+                                last_timing = (
+                                    f"last={elapsed / len(batch):.2f}s/image; "
+                                    f"{sum(map(len, result.token_ids)) / elapsed:.1f} tok/s"
+                                )
                                 break
                             except (
                                 RuntimeError,
@@ -706,9 +740,6 @@ class Study:
                         if count_since_flush >= self.config.snapshot_every:
                             publish_ledger(ledger, snapshots)
                             count_since_flush = 0
-                        print(
-                            f"{stage}: {completed_count}/{expected} outputs", flush=True
-                        )
                     del features, prepared
             latest = ledger.records(latest=True)
             records = [row["payload"] for row in latest if row["status"] == "ok"]
@@ -734,6 +765,7 @@ class Study:
                 )
             return records, report
         finally:
+            bar.close()
             publish_ledger(ledger, snapshots)
             self.cache.flush()
 

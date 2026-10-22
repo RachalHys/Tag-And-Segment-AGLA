@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from itertools import zip_longest
 
 import torch
 
@@ -15,6 +16,7 @@ from tas_runtime.decoding import (
     record_seed,
 )
 from tas_runtime.profiling import environment_manifest, synchronize
+from tas_runtime.progress import progress, step
 
 from .methods import fuse_logits, method_by_id, plausibility_mask
 from .prepared import method_features, pixel_key, prepare_feature_batch
@@ -81,7 +83,7 @@ def compare_snapshots(
         raise AssertionError("Forced-prefix snapshot counts differ.")
     worst = 0.0
     argmax_changes, support_changes = 0, 0
-    for step, (expected, actual) in enumerate(zip(reference, candidate)):
+    for step_index, (expected, actual) in enumerate(zip(reference, candidate)):
         for name in expected:
             first, second = expected[name].float(), actual[name].float()
             worst = max(worst, float((first - second).abs().max()))
@@ -89,7 +91,7 @@ def compare_snapshots(
                 torch.testing.assert_close(first, second, atol=atol, rtol=rtol)
             except AssertionError as exc:
                 raise AssertionError(
-                    f"Forced-prefix step {step}, view {name}: {exc}"
+                    f"Forced-prefix step {step_index}, view {name}: {exc}"
                 ) from exc
             argmax_changes += int((first.argmax(-1) != second.argmax(-1)).sum())
             if name == "ORIG" and support:
@@ -170,7 +172,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     # independent of the optional last-position projection optimization.
     runtime.backend.last_position_logits = False
     try:
-        for identifier in ("E0", "E1"):
+        for identifier in progress(("E0", "E1"), desc="P0 native baselines", unit="method"):
             method = method_by_id(identifier)
             pixels = {
                 "ORIG": prepared[0]["pixels"]["ORIG"]
@@ -273,13 +275,15 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     references = {}
     runtime.backend.last_position_logits = False
     try:
-        for method in pilot_methods:
+        for method in progress(pilot_methods, desc="P0 reference methods", unit="method"):
             seeds = [
                 record_seed(config.seeds[0], row["image_id"], method.id, row["query"])
                 for row in pilot_rows
             ]
             reference = {"seeds": seeds, "logits": [], "greedy": [], "sample": []}
-            for index, item in enumerate(pilot_prepared):
+            for index, item in enumerate(progress(
+                pilot_prepared, desc=f"P0 {method.id} raw references", unit="image", leave=False,
+            )):
                 single = {
                     name: item["pixels"][pixel_key(method, name)]
                     .unsqueeze(0)
@@ -319,10 +323,11 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         raise
     finally:
         runtime.backend.last_position_logits = original_last
-    feature_start = time.perf_counter()
-    features = prepare_feature_batch(runtime, pilot_prepared, pilot_methods)
-    synchronize(runtime.device)
-    report["feature_preparation_seconds"] = time.perf_counter() - feature_start
+    with step("P0 shared visual features"):
+        feature_start = time.perf_counter()
+        features = prepare_feature_batch(runtime, pilot_prepared, pilot_methods)
+        synchronize(runtime.device)
+        report["feature_preparation_seconds"] = time.perf_counter() - feature_start
     report["execution_reference"] = {
         "methods": [method.id for method in pilot_methods],
         "input": "per-image raw pixels; eager attention; full-position vocabulary head",
@@ -347,12 +352,20 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
             ["serial", "packed"] if config.execution == "auto" else [config.execution]
         )
         for count in config.batch_sizes
-        if count <= len(pilot_rows) and (execution != "serial" or count == 1)
+        if count <= len(pilot_rows)
     ]
     if locked_policy is not None:
         # The head is part of the frozen execution policy, including reconnects.
         policies = [(locked_policy, False)]
     else:
+        if original_last and head_native_match:
+            # Keep batching available when only the head-shape optimization
+            # fails. Full-head variants are skipped when their faster-head
+            # counterpart passes the same correctness checks.
+            policies += [
+                ({**policy, "last_position_logits": False}, False)
+                for policy, _ in policies
+            ]
         reference_policy = {
             "backend": "eager",
             "execution": "serial",
@@ -361,9 +374,19 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         }
         if not any(policy == reference_policy for policy, _ in policies):
             policies.append((reference_policy, True))
-    for candidate_policy, fallback in policies:
+    for candidate_policy, fallback in progress(
+        policies, desc="P0 execution options", unit="option",
+    ):
         if fallback and eligible:
             break
+        if not candidate_policy["last_position_logits"] and any(
+            passed["last_position_logits"] and all(
+                passed[key] == candidate_policy[key]
+                for key in ("backend", "execution", "batch_images")
+            )
+            for passed in eligible
+        ):
+            continue
         backend_name = candidate_policy["backend"]
         execution = candidate_policy["execution"]
         requested = candidate_policy["batch_images"]
@@ -431,9 +454,33 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                     checks[mode + "_match"] = (
                         result.token_ids == reference[mode][:count]
                     )
+                    seconds = result.prefill_seconds + result.decode_seconds
+                    checks[mode + "_timing"] = {
+                        "prefill_seconds": result.prefill_seconds,
+                        "decode_seconds": result.decode_seconds,
+                        "batch_seconds": seconds,
+                        "generated_tokens": sum(map(len, result.token_ids)),
+                        "peak_memory_bytes": result.peak_memory_bytes,
+                    }
                     if not checks[mode + "_match"]:
+                        differences = []
+                        for row, (expected_tokens, actual_tokens) in enumerate(zip(
+                            reference[mode][:count], result.token_ids,
+                        )):
+                            for position, (expected_token, actual_token) in enumerate(
+                                zip_longest(expected_tokens, actual_tokens)
+                            ):
+                                if expected_token != actual_token:
+                                    differences.append({
+                                        "image_id": pilot_rows[row]["image_id"],
+                                        "position": position,
+                                        "reference_token": expected_token,
+                                        "candidate_token": actual_token,
+                                    })
+                                    break
+                        checks[mode + "_first_differences"] = differences
                         raise AssertionError(
-                            f"{method.id} {mode} pilot captions changed; candidate not selected automatically."
+                            f"{method.id} {mode} pilot captions changed: {differences}; candidate not selected automatically."
                         )
             # Warm one more run, with comparable maximum token budget.
             # The final method in pilot_methods is the V=3 F4 topology.
@@ -469,6 +516,13 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         )
         if item["status"] == "rejected":
             print(item["error"], flush=True)
+        else:
+            print(
+                f"  {item['seconds']:.2f}s / {item['token_count']} tokens; "
+                f"{item['outputs_per_hour']:.0f} outputs/hour (short pilot); "
+                f"peak {item['peak_memory_bytes'] / 1024**3:.1f} GiB",
+                flush=True,
+            )
     if not eligible:
         report.update(status="failed", error="No execution policy passed P0/pilot.")
         atomic_json(root / "audit.json", report)
@@ -487,5 +541,20 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     runtime.backend.last_position_logits = best["last_position_logits"]
     runtime.set_attention(best["backend"])
     report["last_position_logits"] = best["last_position_logits"]
+    if config.stage == "audit":
+        from tas_runtime.profiling import profile_call
+
+        method = method_by_id("F4")
+        count = best["batch_images"]
+        with step("Profile one warmed F4 pilot (diagnostic only)"):
+            report["operator_profile"] = profile_call(
+                lambda: generate(
+                    runtime, config, method, all_ids[:count],
+                    {name: value[:count] for name, value in method_features(features, method).items()},
+                    references[method.id]["seeds"][:count], greedy=True,
+                    execution=best["execution"], max_new_tokens=config.pilot_tokens,
+                ),
+                root, device=runtime.device,
+            )
     atomic_json(root / "audit.json", report)
     return report

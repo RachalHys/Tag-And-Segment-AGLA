@@ -132,15 +132,23 @@ def restore_nlp(source_root, destination):
     return info
 
 
-def copy_verified(source, destination, *, sha256=None):
+def copy_verified(source, destination, *, sha256=None, progress=None):
     source, destination = Path(source), Path(destination)
     digest = sha256 or sha256_file(source)
     if destination.exists() and destination.stat().st_size == source.stat().st_size:
         if sha256_file(destination) == digest:
+            if progress is not None:
+                progress(source.stat().st_size)
             return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".copying")
-    shutil.copyfile(source, temporary)
+    if progress is None:
+        shutil.copyfile(source, temporary)
+    else:
+        with source.open("rb") as reader, temporary.open("wb") as writer:
+            while block := reader.read(4 * 1024 * 1024):
+                writer.write(block)
+                progress(len(block))
     if sha256_file(temporary) != digest:
         raise ArtifactError(f"Copy verification failed: {destination}")
     os.replace(temporary, destination)

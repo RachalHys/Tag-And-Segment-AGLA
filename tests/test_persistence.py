@@ -128,3 +128,25 @@ def test_nlp_archive_restore_keeps_real_english_tokenization(tmp_path):
         assert nltk.word_tokenize("A cat sits.") == ["A", "cat", "sits", "."]
     finally:
         nltk.data.path[:] = previous
+
+
+def test_copy_progress_preserves_verification_and_reuse(tmp_path):
+    from tas_runtime.artifacts import sha256_file
+    from tas_runtime.persistence import copy_verified
+
+    source, destination = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"a" * (5 * 1024 * 1024))
+    expected = sha256_file(source)
+    chunks = []
+    copy_verified(source, destination, sha256=expected, progress=chunks.append)
+    assert sum(chunks) == source.stat().st_size
+    assert len(chunks) > 1
+    assert destination.read_bytes() == source.read_bytes()
+    original_mtime = destination.stat().st_mtime_ns
+    chunks.clear()
+    copy_verified(source, destination, sha256=expected, progress=chunks.append)
+    assert sum(chunks) == source.stat().st_size
+    assert destination.stat().st_mtime_ns == original_mtime
+    with pytest.raises(ArtifactError, match="verification failed"):
+        copy_verified(source, destination, sha256="0" * 64, progress=chunks.append)
+    assert destination.read_bytes() == source.read_bytes()

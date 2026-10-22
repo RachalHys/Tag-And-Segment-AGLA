@@ -332,3 +332,26 @@ def test_automatic_flow_obeys_scientific_shortlist_before_dependent_stages(
     else:
         assert result["status"] == "no_eligible_finalist"
         assert calls == ["smoke", "screen", "diagnostics"]
+
+
+def test_partial_batch_keeps_locked_shape_without_padding_results(study, monkeypatch):
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "F4")]
+    complete, _ = run.collection("full", rows, methods, seeds=(0,))
+    sizes = []
+    prefill = run.runtime.backend.prefill
+
+    def observed_prefill(ids, features):
+        sizes.append(len(ids))
+        return prefill(ids, features)
+
+    monkeypatch.setattr(run.runtime.backend, "prefill", observed_prefill)
+    partial, report = run.collection("tail", rows[:1], methods, seeds=(0,))
+    assert sizes == [2, 6]  # locked B=2, then packed three-view B=2
+    assert len(partial) == report["completed_outputs"] == report["expected_outputs"] == 2
+    reference = {row["method"]: row for row in complete if row["image_id"] == rows[0]["image_id"]}
+    for row in partial:
+        assert row["token_ids"] == reference[row["method"]]["token_ids"]
+        assert row["actual_batch_images"] == 1
+        assert row["execution_batch_images"] == 2
+        assert row["padding_images"] == 1

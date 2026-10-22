@@ -5,6 +5,12 @@ launcher with a generated, compressed copy of those Python modules. It clones
 the fixed public baseline and restores the experiment modules automatically.
 Only the notebook needs to be uploaded to Colab.
 
+The current delivery starts with `STAGE="audit"` for the requested performance
+investigation. It runs P0, profiles one warmed 24-token F4 call, displays the
+execution table and stops before smoke. Use `STAGE="flow"` for the full study.
+The profile is diagnostic, adds overhead and never supplies policy-selection
+timings. CUDA-profiler unavailability is reported without changing P0.
+
 ## Run in Colab
 
 1. Upload `notebooks/TAS_v7_Colab.ipynb` and select a **CPU** runtime.
@@ -16,9 +22,13 @@ Only the notebook needs to be uploaded to Colab.
 4. Run again after a session ends. Completed results and perception caches are
    reused. Keep the same persistent root in future idea notebooks.
 
-Defaults use `REQUIRE_A100_80GB=False` and `BATCH_SIZES=[1, 2]` for the observed
-A100 40 GB runtime. Larger batch candidates can be tested separately on 80 GB;
+Defaults use `REQUIRE_A100_80GB=False` and `BATCH_SIZES=[1, 2, 4]` for the observed
+A100 40 GB runtime. Serial views and packed views both test image batches;
+rejected last-position heads also test their full-head alternative. Larger
+batch candidates can be tested separately on 80 GB;
 the blocking P0 audit still selects and freezes the execution policy.
+Final partial batches repeat the last input to preserve that shape and discard
+the padded outputs. Reports distinguish real images from the execution batch.
 
 Allow at least **25 GB free Drive space** for the roughly 17–18 GB checkpoints
 plus data and results. Larger runs need more. The default study budget is three
@@ -36,6 +46,11 @@ The study cell forwards child stdout/stderr live, announces each phase and
 prints an elapsed-time heartbeat every 30 seconds during quiet work. Pilot
 checks and caption counts appear as they complete. A heartbeat means the child
 process is still running; it is not a percentage-complete or GPU-use claim.
+Named stages and text bars show model bytes, prepared images, P0 references,
+execution options and captions. Caption bars include rate, ETA and the last
+measured generation time. Updates are outside token-level model execution.
+Rejected-caption comparisons include the first differing token and measured
+prefill/decode time; a passing numerical snapshot alone cannot make them eligible.
 
 ## Experiment flow
 
@@ -107,6 +122,8 @@ evaluator and its separate `colab-amber.txt` profile.
 NLTK_DATA=/path/to/prepared/nlp python -m pytest tests -q
 python -m compileall -q tas_runtime experiments tools tests
 python tools/build_colab_notebook.py --commit <tested-implementation-commit>
+# Short performance check instead of the full study:
+python tools/build_colab_notebook.py --commit <tested-implementation-commit> --stage audit
 ```
 
 The tests passed from source restored by the notebook itself over a fresh public

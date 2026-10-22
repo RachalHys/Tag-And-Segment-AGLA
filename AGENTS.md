@@ -21,6 +21,12 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   Encode cached visual tensors individually to preserve the native FP16 vision
   batch shape. Freeze the vocabulary-head choice with the execution policy;
   the eager/serial/full-head option must pass the same P0 checks.
+  Serial views can still batch multiple independent images. Audit those image
+  batches and failed-head alternatives; keep rejected options out of generation.
+  Keep the selected batch shape on partial batches; padded rows cannot become
+  scored results or change a real image's RNG stream.
+- Use `--stage audit` when building the short performance-check notebook. Its
+  optional operator profile runs only after P0 and never supplies selection timings.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
 - Freeze the shortlist coverage rule before outputs: the approved default is

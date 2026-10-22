@@ -82,8 +82,52 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["RUN_FINAL_REMAINDER"] is False
     assert namespace["AUTO_SHUTDOWN"] is True
     assert namespace["REQUIRE_A100_80GB"] is False
-    assert namespace["BATCH_SIZES"] == [1, 2]
+    assert namespace["BATCH_SIZES"] == [1, 2, 4]
     assert namespace["COVERAGE_TOLERANCE_PP"] == 2.0
+
+
+def test_performance_notebook_stops_after_audit_and_keeps_flow_available():
+    notebook = build(
+        "b" * 40, source_package=fixture_package("b" * 40), stage="audit"
+    )
+    namespace = {}
+    parameters = next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code")
+    exec(compile(parameters, "parameters", "exec"), namespace)
+    assert namespace["STAGE"] == "audit"
+    assert namespace["AUTO_SHUTDOWN"] is True
+    assert any("does not start the 420-caption" in cell["source"] for cell in notebook["cells"])
+
+
+def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch):
+    import json
+    import os
+    import sys
+    from types import ModuleType
+
+    ipython, displays = ModuleType("IPython"), ModuleType("IPython.display")
+    displays.Image = lambda **kwargs: kwargs
+    ipython.display = displays
+    monkeypatch.setitem(sys.modules, "IPython", ipython)
+    monkeypatch.setitem(sys.modules, "IPython.display", displays)
+    for index, name in enumerate(("ff", "ee", "dd", "aa")):
+        directory = tmp_path / "runs" / name
+        (directory / "audit").mkdir(parents=True)
+        config = directory / "resolved-config.json"
+        config.write_text("{}")
+        os.utime(config, (1000 + index, 1000 + index))
+        (directory / "audit/audit.json").write_text(json.dumps({"pilot": [{
+            "backend": "eager", "execution": "serial", "batch_images": 1,
+            "status": "rejected",  # older reports have no head/memory/rate fields
+        }]}))
+    notebook = build("d" * 40, source_package=fixture_package("d" * 40))
+    cell = next(cell["source"] for cell in notebook["cells"] if "runs_root =" in cell["source"])
+    output = []
+    exec(compile(cell, "reports", "exec"), {
+        "persistent": tmp_path, "json": json, "display": output.append,
+        "Markdown": str, "HTML": str,
+    })
+    headings = [value for value in output if isinstance(value, str) and value.startswith("### Run")]
+    assert headings == ["### Run `aa`", "### Run `dd`", "### Run `ee`"]
 
 
 @pytest.fixture
@@ -236,10 +280,14 @@ def test_interrupted_output_forwarding_reaps_child(tmp_path):
     script = """
 import os, pathlib, sys, time
 pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
-print('child-ready',flush=True)
-time.sleep(30)
+try:
+    print('child-ready',flush=True)
+    time.sleep(30)
+finally:
+    pathlib.Path(sys.argv[1] + '.flushed').write_text('saved')
 """
     with redirect_stdout(InterruptedNotebook()), pytest.raises(KeyboardInterrupt):
         run_logged([sys.executable, "-u", "-c", script, pid_file])
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+    assert pid_file.with_name("pid.flushed").read_text() == "saved"

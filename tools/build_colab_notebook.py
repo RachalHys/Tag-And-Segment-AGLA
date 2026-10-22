@@ -28,6 +28,7 @@ def run_logged(command, *, cwd=None, env=None, label="process", heartbeat_second
     import codecs
     import os
     import selectors
+    import signal
     import subprocess
     import time
 
@@ -66,11 +67,15 @@ def run_logged(command, *, cwd=None, env=None, label="process", heartbeat_second
                     )
                     next_heartbeat = now + heartbeat_seconds
         returncode = process.wait()
-    except BaseException:
+    except BaseException as exc:
         if process.poll() is None:
-            process.terminate()
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            if interrupted:
+                process.send_signal(signal.SIGINT)
+            else:
+                process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=10 if interrupted else 5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
@@ -87,7 +92,10 @@ def build(
     repo_url="https://github.com/RachalHys/Tag-And-Segment-AGLA.git",
     *,
     source_package,
+    stage="flow",
 ):
+    if stage not in {"flow", "audit"}:
+        raise ValueError("Notebook default stage must be flow or audit.")
     if (
         source_package["source_commit"] != commit
         or source_package["base_commit"] != BASE_COMMIT
@@ -126,6 +134,13 @@ def build(
             }
         )
 
+    if stage == "audit":
+        markdown("""
+        **Performance check:** this copy uses `STAGE="audit"`. It restores the
+        saved assets, runs P0 and a short operator profile, displays the report,
+        then releases the runtime. It does not start the 420-caption smoke run.
+        Use `STAGE="flow"` for the complete study after choosing the execution policy.
+        """)
     markdown("""
     # TAS v7 — CPU preparation / A100 experiments
 
@@ -161,7 +176,7 @@ def build(
     PERSISTENT_ROOT = "/content/drive/MyDrive/TAS-Shared"
     LOCAL_ROOT = "/content/tas-v7-work"
     PHASE = "auto"             # auto / prepare / run / score / check
-    STAGE = "flow"             # flow / audit / smoke / screen / confirm / controls / diagnostics / final / external
+    STAGE = {stage!r}          # audit = short performance check; flow = complete study
     MAX_SESSION_MINUTES = 180  # planned stop; run again to resume without changing the experiment
     SEEDS = [0, 1, 2]
     REQUIRE_A100_80GB = False   # supports your A100 40 GB; True enforces at least 80 GB
@@ -175,7 +190,7 @@ def build(
     EXTERNAL_MANIFEST = None
     EXTERNAL_IMAGE_ROOT = None
     METHODS = []               # empty = exact initial 14; external runs should select frozen finalists explicitly
-    BATCH_SIZES = [1, 2]        # conservative 40 GB candidates; measured, checked, then locked
+    BATCH_SIZES = [1, 2, 4]     # image batches, including serial views; measured and checked before use
     ATTENTION_BACKENDS = ["eager", "sdpa"]
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
@@ -341,8 +356,13 @@ def build(
         """
     import csv, html
     from IPython.display import Image as DisplayImage
+    def show_table(rows):
+        markup = "".join("<tr>" + "".join("<td>" + html.escape(str(value)) + "</td>" for value in row) + "</tr>" for row in rows)
+        display(HTML("<table>" + markup + "</table>"))
     runs_root = persistent / "runs"
-    for run_dir in sorted(runs_root.glob("*"))[-3:]:
+    run_dirs = [path for path in runs_root.glob("*") if path.is_dir()]
+    run_dirs.sort(key=lambda path: (path / "resolved-config.json").stat().st_mtime if (path / "resolved-config.json").exists() else path.stat().st_mtime, reverse=True)
+    for run_dir in run_dirs[:3]:
         display(Markdown("### Run `" + run_dir.name + "`"))
         session = run_dir / "session.json"
         if session.exists():
@@ -350,11 +370,21 @@ def build(
         gallery = run_dir / "views.png"
         if gallery.exists():
             display(DisplayImage(filename=str(gallery)))
+        audit = run_dir / "audit/audit.json"
+        if audit.exists():
+            value = json.loads(audit.read_text())
+            display(Markdown("**P0 selected policy:** `" + json.dumps(value.get("selected_policy")) + "`"))
+            cells = [("Attention", "Views", "Images/batch", "Last-position head", "Status", "Outputs/h (pilot)", "Peak GiB")]
+            for item in value.get("pilot", []):
+                cells.append((item["backend"], item["execution"], item["batch_images"], item.get("last_position_logits", value.get("last_position_logits", "")), item["status"], round(item["outputs_per_hour"]) if "outputs_per_hour" in item else "", round(item["peak_memory_bytes"] / 1024**3, 1) if "peak_memory_bytes" in item else ""))
+            show_table(cells)
+            operators = run_dir / "audit/operators.txt"
+            if operators.exists():
+                display(HTML("<details><summary>Short operator profile (diagnostic timings)</summary><pre>" + html.escape(operators.read_text()) + "</pre></details>"))
         for summary in sorted(run_dir.glob("*/summary.csv")):
             rows = list(csv.reader(summary.open()))
-            table = "<table>" + "".join("<tr>" + "".join("<td>" + html.escape(value) + "</td>" for value in row) + "</tr>" for row in rows) + "</table>"
             display(Markdown("**" + summary.parent.name + "**"))
-            display(HTML(table))
+            show_table(rows)
     print("Persistent artifacts:", persistent)
     print("Reuse this folder for later sessions/new idea notebooks. Do not delete frozen manifests or rewrite completed runs.")
     """,
@@ -391,6 +421,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit")
     parser.add_argument("--output", default="notebooks/TAS_v7_Colab.ipynb")
+    parser.add_argument("--stage", choices=("flow", "audit"), default="flow")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     commit = subprocess.check_output(
@@ -398,7 +429,7 @@ def main():
         cwd=root,
         text=True,
     ).strip()
-    notebook = build(commit, source_package=package_from_commit(root, commit))
+    notebook = build(commit, source_package=package_from_commit(root, commit), stage=args.stage)
     path = root / args.output
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

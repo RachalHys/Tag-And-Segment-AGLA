@@ -66,13 +66,15 @@ def pilot_case(model, tmp_path):
 
 @pytest.mark.parametrize("sample", [True, False])
 @pytest.mark.parametrize("backend", ["eager", "sdpa"])
+@pytest.mark.parametrize("execution", ["serial", "packed"])
 def test_optimized_policy_validates_native_and_harmonized_paths(
-    pilot_case, tmp_path, sample, backend
+    pilot_case, tmp_path, sample, backend, execution
 ):
     runtime, config, rows, prepared = pilot_case
     config = replace(
         config,
         attention_backends=(backend,),
+        execution=execution,
         generation=replace(
             config.generation, do_sample=sample, temperature=1.0 if sample else 0.0
         ),
@@ -84,6 +86,8 @@ def test_optimized_policy_validates_native_and_harmonized_paths(
     assert report["native_reference_generation"]["temperature"] == 1.0
     assert report["execution_reference"]["methods"] == ["E0", "E1", "F4"]
     assert len(report["pilot"]) == 1
+    assert report["selected_policy"]["batch_images"] == 2
+    assert report["selected_policy"]["execution"] == execution
     checks = report["pilot"][0]["method_checks"]
     for identifier in ("E0", "E1", "F4"):
         assert checks[identifier]["greedy_match"]
@@ -124,6 +128,24 @@ def test_native_feature_corruption_cannot_hide_behind_f4_pilot(
     assert candidate["method_checks"]["E0"]["greedy_match"]
     assert "E1" in candidate["method_checks"]
     assert not (directory / "execution-policy.json").exists()
+
+
+@pytest.mark.parametrize("batch", [2, 4])
+def test_fp16_serial_image_batch_is_actually_audited(pilot_case, tmp_path, batch):
+    runtime, config, rows, prepared = pilot_case
+    if batch == 4:
+        rows = rows + [{**row, "image_id": row["image_id"] + 2} for row in rows]
+        prepared = prepared + prepared
+    runtime.model.half()
+    runtime.dtype = torch.float16
+    report = audit_and_pilot(
+        runtime,
+        replace(config, execution="serial", batch_sizes=(batch,), pilot_images=batch),
+        rows, prepared, tmp_path / "audit",
+    )
+    assert report["selected_policy"]["batch_images"] == batch
+    assert report["selected_policy"]["execution"] == "serial"
+    assert set(report["pilot"][0]["method_checks"]) == {"E0", "E1", "F4"}
 
 
 def test_locked_policy_rechecks_only_the_locked_option(pilot_case, tmp_path):
@@ -173,15 +195,15 @@ def test_failed_head_optimization_uses_checked_full_head_policy(
     assert "step 0, view ORIG" in report["pilot"][0]["error"]
     assert report["selected_policy"] == {
         "backend": "eager",
-        "execution": "serial",
-        "batch_images": 1,
+        "execution": "packed",
+        "batch_images": 2,
         "last_position_logits": False,
     }
     fallback = report["pilot"][-1]
     assert fallback["status"] == "passed"
     assert set(fallback["method_checks"]) == {"E0", "E1", "F4"}
     assert all(
-        check["max_absolute_logit_error"] == 0
+        check["max_absolute_logit_error"] < 1e-5
         for check in fallback["method_checks"].values()
     )
     assert runtime.backend.last_position_logits is False
@@ -257,3 +279,52 @@ def test_failed_locked_head_is_never_replaced(pilot_case, tmp_path, monkeypatch)
     report = json.loads((directory / "audit.json").read_text())
     assert len(report["pilot"]) == 1
     assert "locked last-position head" in report["pilot"][0]["error"]
+
+
+def test_caption_divergence_records_token_position_and_timing(
+    pilot_case, tmp_path, monkeypatch
+):
+    from experiments.tas_v7 import audit
+
+    runtime, config, rows, prepared = pilot_case
+    generate = audit.generate
+
+    def changed_packed_caption(*args, **kwargs):
+        result = generate(*args, **kwargs)
+        views = args[4]
+        if next(iter(views.values())).ndim == 3 and kwargs.get("execution") == "packed":
+            result.token_ids[0][1] = (result.token_ids[0][1] + 1) % runtime.model.config.vocab_size
+        return result
+
+    monkeypatch.setattr(audit, "generate", changed_packed_caption)
+    report = audit_and_pilot(runtime, config, rows, prepared, tmp_path / "audit")
+    check = report["pilot"][0]["method_checks"]["E0"]
+    assert check["greedy_match"] is False
+    assert check["greedy_first_differences"][0]["position"] == 1
+    assert check["greedy_timing"]["generated_tokens"] > 0
+    assert check["greedy_timing"]["batch_seconds"] > 0
+    assert report["selected_policy"] == {
+        "backend": "eager", "execution": "serial", "batch_images": 1,
+        "last_position_logits": False,
+    }
+
+
+def test_audit_only_profile_never_runs_in_flow(pilot_case, tmp_path, monkeypatch):
+    from tas_runtime import profiling
+
+    runtime, config, rows, prepared = pilot_case
+    calls = []
+
+    def profile(call, directory, *, device):
+        calls.append((directory, device))
+        assert len(call().token_ids) == config.batch_sizes[0]
+        return {"status": "fixture"}
+
+    monkeypatch.setattr(profiling, "profile_call", profile)
+    audit_and_pilot(runtime, config, rows, prepared, tmp_path / "flow")
+    assert calls == []
+    report = audit_and_pilot(
+        runtime, replace(config, stage="audit"), rows, prepared, tmp_path / "audit"
+    )
+    assert len(calls) == 1
+    assert report["operator_profile"]["status"] == "fixture"
