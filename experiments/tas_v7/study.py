@@ -505,11 +505,6 @@ class Study:
             * len(methods)
             * sum(len(seeds) if mode == "sample" else 1 for mode in modes)
         )
-        scorer = (
-            _scorer(self.work["data_root"], rows)
-            if self.config.dataset == "coco"
-            else None
-        )
 
         def key_for(row, method, seed, mode):
             return {
@@ -546,6 +541,11 @@ class Study:
                     for row in ledger.records(latest=True)
                     if row["status"] == "ok"
                 ], report
+        scorer = (
+            _scorer(self.work["data_root"], rows)
+            if self.config.dataset == "coco"
+            else None
+        )
         try:
             # Methods and seeds share immutable prompt text/IDs. KV state and
             # generated prefixes remain independent in the decoder.

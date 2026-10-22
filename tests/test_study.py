@@ -162,6 +162,7 @@ def test_real_tiny_multimodal_collection_resume_and_cpu_reports(study, monkeypat
         raise AssertionError("Completed captions must not be recomputed")
 
     monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
+    monkeypatch.setattr("experiments.tas_v7.study._scorer", forbidden)
     resumed, _ = run.collection("smoke-fixture", rows, methods, seeds=(0,))
     assert resumed == records
     assert prompt_queries == ["Describe this image."]
