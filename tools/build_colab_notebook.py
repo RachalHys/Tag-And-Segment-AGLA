@@ -151,8 +151,9 @@ def build(
         It reports token drift, paired CHAIR/coverage/length, uncertainty, speed
         and sampled operator profiles, then saves to Drive and releases the runtime.
         It does not run smoke or select a winning TAS hypothesis. This small
-        comparison does not establish quality equivalence or approve the batch
-        policy for the complete study. The regular notebook still defaults to flow.
+        comparison does not establish quality equivalence or automatically change
+        the complete study's execution protocol. The regular notebook defaults
+        to flow with its explicitly named experimental batched protocol.
         Existing CPU-prepared assets are reused; choose A100 and Run all.
         The study has a 20-minute cooperative budget, checked between calls;
         unfinished work is saved. Environment installation is additional and
@@ -191,6 +192,28 @@ def build(
     Full A100 weights have not been tested by the local CPU suite. P0 rejects
     baseline mismatches before bulk generation. No scientific gains are assumed.
     """)
+    if stage == "flow":
+        markdown("""
+        **Fast experimental study:** `EXECUTION_PROTOCOL="tas-batched-study-v1"`
+        fixes SDPA, packed visual branches, four images per batch and the
+        last-position vocabulary head. Native E0/E1 B=1 reproduction, geometry,
+        numerical and filtered-support checks still block generation. P0 checks
+        fixed-prefix logits/support for all 14 methods and matched baselines
+        against immutable raw-per-image eager/full-head references. E0/E1/F4
+        short greedy/sample probes report token drift, rather than requiring
+        exact captions from batched kernels. Other methods have snapshot checks,
+        not complete serial-caption comparisons.
+        The same fixed policy runs every comparison, with separate result identities.
+
+        This is an explicitly accepted tradeoff for hypothesis testing, not an
+        official native evaluation or proof of quality equivalence. A four-image,
+        one-seed A100 pilot measured 6.6× TAG and 7.9× F4 warm generation speedups;
+        those measurements do not predict whole-study speed or quality.
+        P0 does not repeat the 24-option search or silently fall back to another
+        batch/precision. Use `EXECUTION_PROTOCOL="strict"` before any output for
+        strict token-equality selection instead. Precision, generation settings,
+        cohorts and the full experiment flow are unchanged.
+        """)
     code(f"""
     # Edit these settings once. Reuse PERSISTENT_ROOT in future idea notebooks.
     REPO_URL = {repo_url!r}
@@ -200,6 +223,7 @@ def build(
     LOCAL_ROOT = "/content/tas-v7-work"
     PHASE = "auto"             # auto / prepare / run / score / check
     STAGE = {stage!r}          # flow = complete study; batch_compare = paired execution check; audit = P0 only
+    EXECUTION_PROTOCOL = {"tas-batched-study-v1" if stage == "flow" else "strict"!r}
     COMPARISON_IMAGES = {4 if stage == "batch_compare" else 12}    # fixed A prefix; used only by batch_compare
     MAX_SESSION_MINUTES = {20 if stage == "batch_compare" else 180}  # cooperative study budget; environment setup is additional
     SEEDS = [0, 1, 2]
@@ -214,8 +238,10 @@ def build(
     EXTERNAL_MANIFEST = None
     EXTERNAL_IMAGE_ROOT = None
     METHODS = {["E0", "E1", "F4"] if stage == "batch_compare" else []!r}  # comparison subset; empty = initial 14 for flow
-    BATCH_SIZES = [1, 2, 4]     # image batches, including serial views; measured and checked before use
-    ATTENTION_BACKENDS = ["eager", "sdpa"]
+    BATCH_SIZES = [4] if EXECUTION_PROTOCOL == "tas-batched-study-v1" else [1, 2, 4]
+    EXECUTION = "packed" if EXECUTION_PROTOCOL == "tas-batched-study-v1" else "auto"
+    ATTENTION_BACKENDS = ["sdpa"] if EXECUTION_PROTOCOL == "tas-batched-study-v1" else ["eager", "sdpa"]
+    PILOT_IMAGES = 4 if EXECUTION_PROTOCOL == "tas-batched-study-v1" else 8
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
     COVERAGE_TOLERANCE_PP = 2.0  # approved absolute percentage-point loss vs harmonized TAG; freeze before outputs
@@ -305,6 +331,7 @@ def build(
     configuration = {
         "persistent_root":PERSISTENT_ROOT, "local_root":LOCAL_ROOT, "stage":STAGE,
         "seeds":SEEDS, "methods":METHODS, "batch_sizes":BATCH_SIZES,
+        "execution_protocol":EXECUTION_PROTOCOL, "execution":EXECUTION, "pilot_images":PILOT_IMAGES,
         "attention_backends":ATTENTION_BACKENDS, "last_position_logits":LAST_POSITION_LOGITS,
         "comparison_images":COMPARISON_IMAGES,
         "max_session_minutes":MAX_SESSION_MINUTES, "require_a100":REQUIRE_A100_80GB,
@@ -336,8 +363,9 @@ def build(
 
     GPU sessions: lightweight preflight → local asset restoration → one model
     load → baseline/view audit → correctness/throughput pilot → configured
-    stages. Per-image RNG makes retries/resume independent of job order. A
-    rejected optimization is recorded; baseline failures block larger runs.
+    stages. Per-image RNG makes retries/resume independent of job order.
+    The named batched study checks one fixed policy; strict mode selects only
+    exact-token passing options. Blocking check failures stop larger runs.
     Results use immutable chunks and perception caches use shards on Drive.
     Child stdout/stderr is forwarded live to this cell. Quiet phases print an
     elapsed-time heartbeat every 30 seconds; it indicates a running process,
@@ -376,6 +404,9 @@ def build(
     Reports include descriptive comparisons for paired captions with exactly
     equal word counts. Batch latency and amortized seconds/image are separate.
     CPU scoring/report regeneration is available with PHASE="score".
+    The execution protocol is a separate label: `tas-batched-study-v1` accepts
+    reported token drift for quick research comparisons; `strict` requires the
+    audited token matches. Do not pool their outputs as the same experiment.
     """)
     code(
         """
@@ -398,11 +429,22 @@ def build(
         audit = run_dir / "audit/audit.json"
         if audit.exists():
             value = json.loads(audit.read_text())
-            display(Markdown("**P0 selected policy:** `" + json.dumps(value.get("selected_policy")) + "`"))
+            protocol = value.get("execution_protocol", "strict")
+            display(Markdown("**Execution protocol:** `" + protocol + "`"))
+            if protocol == "tas-batched-study-v1":
+                display(Markdown("Experimental packed B=4 study; token drift is reported. Numerical, support, geometry and native baseline checks remain blocking. Quality equivalence is not established."))
+            policy_label = "P0 fixed policy" if protocol == "tas-batched-study-v1" else "P0 selected policy"
+            display(Markdown("**" + policy_label + ":** `" + json.dumps(value.get("selected_policy")) + "`"))
             cells = [("Attention", "Views", "Images/batch", "Last-position head", "Status", "Outputs/h (pilot)", "Peak GiB")]
             for item in value.get("pilot", []):
                 cells.append((item["backend"], item["execution"], item["batch_images"], item.get("last_position_logits", value.get("last_position_logits", "")), item["status"], round(item["outputs_per_hour"]) if "outputs_per_hour" in item else "", round(item["peak_memory_bytes"] / 1024**3, 1) if "peak_memory_bytes" in item else ""))
             show_table(cells)
+            if protocol == "tas-batched-study-v1":
+                checks = [("Method", "Scientific protocol", "Greedy match", "Sample match", "Argmax changes", "Support changes")]
+                for item in value.get("pilot", []):
+                    for method, check in item.get("method_checks", {}).items():
+                        checks.append((method, check.get("protocol", ""), check.get("greedy_match", "not probed"), check.get("sample_match", "not probed"), check.get("argmax_changes", ""), check.get("support_token_changes", "")))
+                show_table(checks)
             operators = run_dir / "audit/operators.txt"
             if operators.exists():
                 display(HTML("<details><summary>Short operator profile (diagnostic timings)</summary><pre>" + html.escape(operators.read_text()) + "</pre></details>"))

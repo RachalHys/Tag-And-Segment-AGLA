@@ -43,6 +43,8 @@ def plan(config):
         "budget_minutes_per_session": config.max_session_minutes,
         "resume": "completed image/method/seed/config records are reused across sessions",
         "stage_flow": "blocking P0, then automatic first-round stages",
+        "execution_protocol": config.execution_protocol,
+        "fixed_execution_policy": config.fixed_execution_policy,
         "shortlist": {
             "coverage_baseline": "E1-H",
             "maximum_coverage_loss_percentage_points": 100 * config.coverage_tolerance,

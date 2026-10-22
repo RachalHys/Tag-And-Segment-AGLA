@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tas_runtime.artifacts import atomic_json, atomic_jsonl
+from tas_runtime.artifacts import atomic_json, atomic_jsonl, canonical_hash
 
 from .evaluation import (
     _pairing_key,
@@ -63,6 +63,12 @@ def summarize(records):
 
 
 def grouped_summary(records):
+    executions = {
+        (row.get("execution_protocol", "strict"), canonical_hash(row.get("execution_policy")))
+        for row in records
+    }
+    if len(executions) > 1:
+        raise ValueError("A study report/shortlist cannot mix execution protocols or policies.")
     groups = defaultdict(list)
     for row in records:
         groups[
@@ -73,6 +79,8 @@ def grouped_summary(records):
             "method": method,
             "protocol": protocol,
             "generation_mode": mode,
+            "execution_protocol": rows[0].get("execution_protocol", "strict"),
+            "execution_policy": rows[0].get("execution_policy"),
             **summarize(rows),
         }
         for (method, protocol, mode), rows in sorted(groups.items())
@@ -295,6 +303,7 @@ def write_report(
     fields = [
         "method",
         "protocol",
+        "execution_protocol",
         "generation_mode",
         "n_captions",
         "reused_captions",

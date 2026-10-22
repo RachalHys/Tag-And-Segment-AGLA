@@ -112,8 +112,15 @@ def test_empty_diagnostics_cannot_be_reported_as_a_completed_comparison():
         paired_intervention_report([], {"D-MASK": []}, repeats=100)
 
 
-def test_diagnostics_report_perfect_mask_match_and_unmatched_noop(study, monkeypatch):
+@pytest.mark.parametrize("batched_execution", [False, True])
+def test_diagnostics_report_perfect_mask_match_and_unmatched_noop(study, monkeypatch, batched_execution):
     run, rows = study
+    if batched_execution:
+        from test_batched_study import batched
+
+        run.config = batched(run.config)
+        run.policy = run.config.fixed_execution_policy
+        run.runtime.set_attention("sdpa")
     monkeypatch.setattr(run, "rows", lambda cohort: rows)
     original_perception = run.perception_for
 
@@ -176,4 +183,10 @@ def test_diagnostics_report_perfect_mask_match_and_unmatched_noop(study, monkeyp
     )
     completed = json.loads((directory / "diagnostics.json").read_text())
     assert completed["paired_interventions"] == "paired-interventions.json"
+    assert completed["caption_execution_protocol"] == run.config.execution_protocol
+    assert completed["caption_execution_policy"] == run.policy
+    assert completed["probe_execution"]["batch_images"] == 1
+    assert completed["probe_execution"]["views"] == ["ORIG", "OBJ-H", "BH", "FG-U"]
+    influence = [json.loads(line) for line in (directory / "fixed-prefix-influence.jsonl").read_text().splitlines()]
+    assert all(row["probe_execution"] == completed["probe_execution"] for row in influence)
     run.close()

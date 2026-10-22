@@ -345,7 +345,7 @@ def test_changed_diagnostic_pixels_get_a_new_identity_even_with_identical_area_m
     assert Path(first_directory).exists()
 
 
-@pytest.mark.parametrize("field", ["study", "rows", "generation", "seeds", "execution", "partial_batch", "modes"])
+@pytest.mark.parametrize("field", ["study", "rows", "generation", "seeds", "execution", "partial_batch", "modes", "execution_protocol"])
 def test_diagnostic_reuse_rejects_changed_protocol_before_inference(study, monkeypatch, field):
     from copy import deepcopy
     from tas_runtime.artifacts import ArtifactError
@@ -576,7 +576,7 @@ def test_screen_reuse_avoids_all_generation_and_preserves_science(study, monkeyp
 
 @pytest.mark.parametrize(
     "field",
-    ["study", "rows", "generation", "seeds", "execution", "partial_batch", "interventions"],
+    ["study", "rows", "generation", "seeds", "execution", "partial_batch", "interventions", "execution_protocol"],
 )
 def test_screen_reuse_rejects_incompatible_inputs_before_inference(study, monkeypatch, field):
     from copy import deepcopy
@@ -594,6 +594,7 @@ def test_screen_reuse_rejects_incompatible_inputs_before_inference(study, monkey
         "generation": {**previous["generation"], "temperature": 0.7},
         "seeds": [1],
         "execution": {**previous["execution"], "last_position_logits": False},
+        "execution_protocol": "tas-batched-study-v1",
         "partial_batch": "a different padding rule",
         "interventions": {str(rows[0]["image_id"]): {"modified": True}},
     }

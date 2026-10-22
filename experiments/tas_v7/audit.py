@@ -18,7 +18,10 @@ from tas_runtime.decoding import (
 from tas_runtime.profiling import environment_manifest, synchronize
 from tas_runtime.progress import progress, step
 
-from .methods import fuse_logits, method_by_id, plausibility_mask
+from .methods import (
+    fuse_logits, harmonized_baselines, initial_methods, method_by_id,
+    plausibility_mask,
+)
 from .prepared import method_features, pixel_key, prepare_feature_batch
 
 
@@ -117,9 +120,9 @@ def compare_snapshots(
 def audit_and_pilot(runtime, config, rows, prepared, directory):
     """Eager baseline gate, then one-at-a-time candidates; never silent fallback.
 
-    A faster kernel is eligible only if fixed-prefix logits agree within the
-    recorded tolerance and greedy captions match on the pilot images. Failed
-    candidates stay in the report; the reference eager/serial path remains.
+    Strict execution requires pilot token equality. The explicitly named batched
+    study keeps native baseline and numerical/support gates, records free-token
+    drift, and checks only its fixed policy without a fallback or policy sweep.
     """
     import json
     from pathlib import Path
@@ -130,9 +133,14 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     locked_policy = (
         json.loads(policy_path.read_text()) if policy_path.exists() else None
     )
+    experimental = config.execution_protocol == "tas-batched-study-v1"
+    if experimental and locked_policy is not None and locked_policy != config.fixed_execution_policy:
+        raise ValueError("The locked policy differs from tas-batched-study-v1; use the intended run identity.")
     available = min(config.pilot_images, len(rows), len(prepared))
     if available < 1:
         raise ValueError("P0 needs at least one prepared pilot image.")
+    if experimental and available < 4:
+        raise ValueError("The batched study audit needs four prepared pilot images; never shrink its batch.")
     reference_count = (
         locked_policy["batch_images"] if locked_policy is not None
         else max((count for count in config.batch_sizes if count <= available), default=1)
@@ -143,6 +151,11 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         "environment": environment_manifest(),
         "baseline_checks": [],
         "pilot": [],
+        "execution_protocol": config.execution_protocol,
+        "execution_acceptance": (
+            "native B=1 equality and fixed-prefix numerical/support gates; free-token drift reported"
+            if experimental else "native baselines, numerical/support and pilot token equality"
+        ),
         "geometry": prepared[0]["metadata"],
         "caption_labels": "perception-only; no labels added to LLaVA prompt",
         "scientific_protocols": {
@@ -155,6 +168,8 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     _, ids, _ = runtime.prompt(rows[0]["query"], config.generation.conv_mode)
     ids = ids.unsqueeze(0).to(runtime.device)
     runtime.set_attention("eager")
+    if experimental:
+        runtime.backend.last_position_logits = config.fixed_execution_policy["last_position_logits"]
     original_last = runtime.backend.last_position_logits
     head_native_match = True
     # The original E1 implementation defines sampling only. Audit that native
@@ -261,6 +276,11 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     finally:
         runtime.backend.last_position_logits = original_last
 
+    if experimental and not head_native_match:
+        report.update(status="failed", error="The fixed last-position head failed native B=1 sampled parity.")
+        atomic_json(root / "audit.json", report)
+        raise RuntimeError(report["error"])
+
     # Only these rows can be consumed by a candidate. Extra configured preview
     # images never contributed to a check; do not generate unused raw captions.
     pilot_rows = rows[:reference_count]
@@ -269,6 +289,14 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     # candidate uses the same cached-feature path as the actual study, compared
     # with per-image eager/full-head RAW PIXEL references, not cached features.
     pilot_methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    if experimental:
+        # Keep the V=3 benchmark last. Snapshot checks cover every first-round
+        # formula/geometry and both matched baselines without generating a full
+        # serial caption for every configuration.
+        pilot_methods = [
+            method for method in initial_methods() + harmonized_baselines()
+            if method.id != "F4"
+        ] + [method_by_id("F4")]
     prompt_ids = [
         runtime.prompt(row["query"], config.generation.conv_mode)[1]
         for row in pilot_rows
@@ -284,6 +312,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         1,
     ]
     references = {}
+    raw_snapshots = {}
     runtime.backend.last_position_logits = False
     try:
         for method in progress(pilot_methods, desc="P0 reference methods", unit="method"):
@@ -295,26 +324,44 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
             for index, item in enumerate(progress(
                 pilot_prepared, desc=f"P0 {method.id} raw references", unit="image", leave=False,
             )):
-                single = {
-                    name: item["pixels"][pixel_key(method, name)]
-                    .unsqueeze(0)
-                    .to(runtime.device, runtime.dtype)
-                    for name in method.views
-                }
-                reference["logits"].append(
-                    forced_prefix_logits(
-                        runtime.backend,
-                        all_ids[index : index + 1],
-                        single,
-                        forced,
-                        execution="serial",
+                if experimental:
+                    # Only immutable logits at this exact image/prompt/forced
+                    # prefix are reused. Free generation owns fresh KV state.
+                    for name in method.views:
+                        key = (index, pixel_key(method, name))
+                        if key not in raw_snapshots:
+                            pixel = item["pixels"][key[1]].unsqueeze(0).to(runtime.device, runtime.dtype)
+                            snapshots = forced_prefix_logits(
+                                runtime.backend, all_ids[index : index + 1],
+                                {name: pixel}, forced, execution="serial",
+                            )
+                            raw_snapshots[key] = [snapshot[name] for snapshot in snapshots]
+                    reference["logits"].append([
+                        {name: raw_snapshots[(index, pixel_key(method, name))][step]
+                         for name in method.views}
+                        for step in range(len(forced) + 1)
+                    ])
+                else:
+                    single = {
+                        name: item["pixels"][pixel_key(method, name)].unsqueeze(0).to(runtime.device, runtime.dtype)
+                        for name in method.views
+                    }
+                    reference["logits"].append(forced_prefix_logits(
+                        runtime.backend, all_ids[index : index + 1], single,
+                        forced, execution="serial",
+                    ))
+                modes = ()
+                if not experimental or method.id in {"E0", "E1", "F4"}:
+                    modes = (
+                        ("greedy", "sample")
+                        if config.generation.do_sample and (experimental or method.protocol == "LEGACY")
+                        else ("greedy",)
                     )
-                )
-                modes = (
-                    ("greedy", "sample")
-                    if method.protocol == "LEGACY" and config.generation.do_sample
-                    else ("greedy",)
-                )
+                if modes and experimental:
+                    single = {
+                        name: item["pixels"][pixel_key(method, name)].unsqueeze(0).to(runtime.device, runtime.dtype)
+                        for name in method.views
+                    }
                 for mode in modes:
                     reference[mode] += generate(
                         runtime,
@@ -345,7 +392,8 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         "input": "per-image raw pixels; eager attention; full-position vocabulary head",
         "candidate_input": "cached projected features; selected head, attention and batch policy",
         "vision_encoding": "each exact tensor encoded once at native image batch size 1",
-        "checks": "fixed-prefix logits/support, greedy tokens, native sampled tokens when study samples",
+        "checks": "fixed-prefix logits/support, greedy tokens, sampled tokens when requested; token drift is descriptive only in tas-batched-study-v1",
+        "token_drift_methods": ["E0", "E1", "F4"],
         "scope": "pilot only; no bitwise equivalence guarantee for unseen images or longer captions",
     }
     eligible = []
@@ -366,11 +414,13 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         for count in config.batch_sizes
         if count <= len(pilot_rows)
     ]
+    if experimental:
+        policies = [(config.fixed_execution_policy, False)]
     if locked_policy is not None:
         # The head is part of the frozen execution policy, including reconnects.
         policies = [(locked_policy, False)]
     else:
-        if original_last and head_native_match:
+        if not experimental and original_last and head_native_match:
             # Keep batching available when only the head-shape optimization
             # fails. Full-head variants are skipped when their faster-head
             # counterpart passes the same correctness checks.
@@ -384,7 +434,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
             "batch_images": 1,
             "last_position_logits": False,
         }
-        if not any(policy == reference_policy for policy, _ in policies):
+        if not experimental and not any(policy == reference_policy for policy, _ in policies):
             policies.append((reference_policy, True))
     for candidate_policy, fallback in progress(
         policies, desc="P0 execution options", unit="option",
@@ -491,9 +541,10 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                                     })
                                     break
                         checks[mode + "_first_differences"] = differences
-                        raise AssertionError(
-                            f"{method.id} {mode} pilot captions changed: {differences}; candidate not selected automatically."
-                        )
+                        if not experimental:
+                            raise AssertionError(
+                                f"{method.id} {mode} pilot captions changed: {differences}; candidate not selected automatically."
+                            )
             # Warm one more run, with comparable maximum token budget.
             # The final method in pilot_methods is the V=3 F4 topology.
             result = generate(
@@ -516,6 +567,16 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                 peak_memory_bytes=result.peak_memory_bytes,
             )
             eligible.append(item)
+            if experimental:
+                item["token_drift"] = {
+                    identifier: {
+                        mode: check[mode + "_first_differences"]
+                        for mode in ("greedy", "sample")
+                        if mode + "_first_differences" in check
+                    }
+                    for identifier, check in item["method_checks"].items()
+                    if any(mode + "_first_differences" in check for mode in ("greedy", "sample"))
+                }
         except (RuntimeError, AssertionError, FloatingPointError) as exc:
             item.update(status="rejected", error=f"{type(exc).__name__}: {exc}")
             if torch.cuda.is_available():
@@ -535,6 +596,8 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                 f"peak {item['peak_memory_bytes'] / 1024**3:.1f} GiB",
                 flush=True,
             )
+            if experimental and item["token_drift"]:
+                print(f"  Experimental token drift recorded: {item['token_drift']}", flush=True)
     if not eligible:
         report.update(status="failed", error="No execution policy passed P0/pilot.")
         atomic_json(root / "audit.json", report)

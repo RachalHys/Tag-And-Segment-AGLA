@@ -46,6 +46,19 @@ def fixture_package(commit):
     }
 
 
+def notebook_configuration(notebook, namespace):
+    """Resolve the actual JSON config assignment without installing Colab assets."""
+    cell = next(cell["source"] for cell in notebook["cells"] if "configuration = {" in cell["source"])
+    assignment = next(
+        node for node in ast.walk(ast.parse(cell))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "configuration" for target in node.targets)
+    )
+    scope = dict(namespace, actual_commit=namespace["RESEARCH_COMMIT"])
+    exec(compile(ast.Module(body=[assignment], type_ignores=[]), "configuration", "exec"), scope)
+    return scope["configuration"]
+
+
 def test_notebook_schema_all_cells_compile_and_no_model_code_duplication():
     value = build("a" * 40, source_package=fixture_package("a" * 40))
     notebook = nbformat.from_dict(value)
@@ -84,8 +97,45 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["RUN_FINAL_REMAINDER"] is False
     assert namespace["AUTO_SHUTDOWN"] is True
     assert namespace["REQUIRE_A100_80GB"] is False
-    assert namespace["BATCH_SIZES"] == [1, 2, 4]
+    assert namespace["EXECUTION_PROTOCOL"] == "tas-batched-study-v1"
+    assert namespace["BATCH_SIZES"] == [4]
+    assert namespace["EXECUTION"] == "packed"
+    assert namespace["ATTENTION_BACKENDS"] == ["sdpa"]
+    assert namespace["PILOT_IMAGES"] == 4
     assert namespace["COVERAGE_TOLERANCE_PP"] == 2.0
+    from experiments.tas_v7.cli import plan
+    from tas_runtime.config import StudyConfig
+
+    config = StudyConfig.from_dict(notebook_configuration(value, namespace))
+    resolved = plan(config)
+    assert config.execution_protocol == "tas-batched-study-v1"
+    assert config.batch_sizes == (4,)
+    assert config.execution == "packed"
+    assert config.attention_backends == ("sdpa",)
+    assert config.pilot_images == 4
+    assert config.last_position_logits is True
+    assert config.generation.max_new_tokens == 180
+    assert config.generation.precision == "fp16"
+    assert config.run_confirmation and config.run_controls and config.run_diagnostics
+    assert resolved["initial_methods"] == 14
+    assert resolved["smoke"] == 420
+    assert resolved["budget_minutes_per_session"] == 180
+
+
+def test_full_notebook_can_explicitly_select_strict_before_outputs():
+    notebook = build("b" * 40, source_package=fixture_package("b" * 40))
+    parameters = next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code")
+    parameters = parameters.replace("EXECUTION_PROTOCOL = 'tas-batched-study-v1'", "EXECUTION_PROTOCOL = 'strict'")
+    namespace = {}
+    exec(parameters, namespace)
+    from tas_runtime.config import StudyConfig
+
+    config = StudyConfig.from_dict(notebook_configuration(notebook, namespace))
+    assert config.execution_protocol == "strict"
+    assert config.batch_sizes == (1, 2, 4)
+    assert config.execution == "auto"
+    assert config.attention_backends == ("eager", "sdpa")
+    assert config.pilot_images == 8
 
 
 def test_performance_notebook_stops_after_audit_and_keeps_flow_available():
@@ -96,7 +146,11 @@ def test_performance_notebook_stops_after_audit_and_keeps_flow_available():
     parameters = next(cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code")
     exec(compile(parameters, "parameters", "exec"), namespace)
     assert namespace["STAGE"] == "audit"
+    assert namespace["EXECUTION_PROTOCOL"] == "strict"
+    assert namespace["BATCH_SIZES"] == [1, 2, 4]
     assert namespace["AUTO_SHUTDOWN"] is True
+    assert namespace["EXECUTION"] == "auto"
+    assert namespace["PILOT_IMAGES"] == 8
     assert any("does not start the 420-caption" in cell["source"] for cell in notebook["cells"])
 
 
@@ -113,19 +167,16 @@ def test_separate_batch_comparison_notebook_is_bounded_and_displays_paired_repor
     assert namespace["METHODS"] == ["E0", "E1", "F4"]
     assert namespace["MAX_SESSION_MINUTES"] == 20
     assert namespace["AUTO_SHUTDOWN"] is True
+    assert namespace["EXECUTION_PROTOCOL"] == "strict"
+    assert namespace["BATCH_SIZES"] == [1, 2, 4]
+    assert namespace["EXECUTION"] == "auto"
+    assert namespace["PILOT_IMAGES"] == 8
     assert any("24 captions total" in cell["source"] for cell in notebook["cells"])
     assert any("comparison.json" in cell["source"] for cell in notebook["cells"])
     from experiments.tas_v7.cli import plan
     from tas_runtime.config import StudyConfig
 
-    config = StudyConfig.from_dict({
-        "persistent_root": namespace["PERSISTENT_ROOT"],
-        "stage": namespace["STAGE"],
-        "comparison_images": namespace["COMPARISON_IMAGES"],
-        "methods": namespace["METHODS"],
-        "batch_sizes": namespace["BATCH_SIZES"],
-        "max_session_minutes": namespace["MAX_SESSION_MINUTES"],
-    })
+    config = StudyConfig.from_dict(notebook_configuration(notebook, namespace))
     resolved = plan(config)
     assert resolved["complete_captions"] == 24
     assert resolved["budget_minutes_per_session"] == 20
@@ -153,6 +204,14 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
             "backend": "eager", "execution": "serial", "batch_images": 1,
             "status": "rejected",  # older reports have no head/memory/rate fields
         }]}))
+    (tmp_path / "runs/aa/audit/audit.json").write_text(json.dumps({
+        "execution_protocol": "tas-batched-study-v1",
+        "selected_policy": {"backend": "sdpa", "execution": "packed", "batch_images": 4, "last_position_logits": True},
+        "pilot": [{
+            "backend": "sdpa", "execution": "packed", "batch_images": 4, "status": "passed",
+            "method_checks": {"F4": {"protocol": "HARMONIZED", "greedy_match": False, "sample_match": True, "argmax_changes": 1, "support_token_changes": 0}},
+        }],
+    }))
     comparison = tmp_path / "runs/aa/batch-comparison-fixture"
     comparison.mkdir()
     (comparison / "comparison.json").write_text(json.dumps({
@@ -187,6 +246,9 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
     })
     headings = [value for value in output if isinstance(value, str) and value.startswith("### Run")]
     assert headings == ["### Run `aa`", "### Run `dd`", "### Run `ee`"]
+    assert any("**Execution protocol:** `tas-batched-study-v1`" in str(value) for value in output)
+    assert any("**Execution protocol:** `strict`" in str(value) for value in output)
+    assert any("Greedy match" in str(value) and "HARMONIZED" in str(value) for value in output)
     assert any("Paired execution comparison" in str(value) for value in output)
     assert any("Batched caption" in str(value) for value in output)
     assert any("Paired perception interventions" in str(value) for value in output)

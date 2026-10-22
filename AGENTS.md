@@ -16,27 +16,35 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   `python tools/build_colab_notebook.py --commit <implementation-commit>`.
   The generated notebook packages that commit's experiment Python modules and
   restores them over the pinned public baseline; no separate upload is needed.
-- Keep the P0 baseline, geometry, support and execution checks blocking. CPU
+- Keep P0 native baseline, geometry, numerical and support checks blocking. CPU
   fixtures do not establish full-checkpoint parity or A100 performance.
   Encode cached visual tensors individually to preserve the native FP16 vision
-  batch shape. Freeze the vocabulary-head choice with the execution policy;
-  the eager/serial/full-head option must pass the same P0 checks.
-  Serial views can still batch multiple independent images. Audit those image
-  batches and failed-head alternatives; keep rejected options out of generation.
+  batch shape. Freeze the vocabulary-head choice with the execution policy.
+  Strict mode requires exact-token checks, including the eager/serial/full-head
+  fallback; keep rejected strict options out of strict generation.
   Keep the selected batch shape on partial batches; padded rows cannot become
   scored results or change a real image's RNG stream.
 - Deliver the notebook with the default `STAGE="flow"` for the full implemented
-  study. `--stage audit` is an optional short diagnostic, not the default delivery.
+  study and the user-authorized `execution_protocol="tas-batched-study-v1"`.
+  It fixes SDPA, packed B=4, last-position logits and FP16, accepts reported free
+  token drift for hypothesis testing and checks fixed-prefix snapshots for all
+  14 methods plus matched baselines; short free-token probes cover E0/E1/F4.
+  Do not repeat the strict option sweep or silently change batch,
+  precision or protocol. Native E0/E1 B=1 reproduction remains blocking.
+  The API, audit and batch-comparison notebook retain strict defaults.
+  `--stage audit` is an optional short diagnostic, not the default delivery.
   Its optional operator profile runs only after P0 and never supplies selection timings.
   Profiler unavailability must not suppress generation errors or display stale tables.
 - `TAS_v7_Batch_Compare.ipynb` is a separate descriptive execution comparison.
   It keeps strict B=1 P0, evaluates batched token drift under its own run/ledger
-  identities, and never promotes a rejected policy into the full study.
+  identities, and never automatically promotes a rejected policy into the study.
+  The explicitly authorized batched study protocol is separate from strict parity.
   Preserve method IDs and per-image RNG keys across both execution policies.
   Compare complete captions on the predeclared A prefix; keep quality scores
   out of execution-policy selection. No equivalence margin is approved.
   Keep its quick notebook defaults at 4 images, E0/E1/F4, 24 complete captions
-  and a 20-minute cooperative study budget; full-study defaults stay unchanged.
+  and a 20-minute cooperative study budget. Full flow retains all 14 methods,
+  the original cohorts/generation settings and its 180-minute study budget.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
   Reuse screen samples in controls only with identical ordered inputs, methods,

@@ -53,6 +53,7 @@ class StudyConfig:
     batch_sizes: tuple[int, ...] = (1, 2, 4, 8)
     attention_backends: tuple[str, ...] = ("eager", "sdpa")
     execution: str = "auto"
+    execution_protocol: str = "strict"
     last_position_logits: bool = True
     pilot_tokens: int = 24
     pilot_images: int = 8
@@ -111,6 +112,21 @@ class StudyConfig:
             raise ValueError("Supported attention backends: eager, sdpa.")
         if self.execution not in {"auto", "serial", "packed"}:
             raise ValueError("execution must be auto, serial or packed.")
+        if self.execution_protocol not in {"strict", "tas-batched-study-v1"}:
+            raise ValueError("Unknown execution protocol.")
+        if self.execution_protocol == "tas-batched-study-v1":
+            if self.dataset != "coco" or self.stage in {"batch_compare", "external"}:
+                raise ValueError("The batched study protocol is for the COCO study, not external/comparison runs.")
+            if (
+                tuple(self.batch_sizes) != (4,)
+                or self.execution != "packed"
+                or tuple(self.attention_backends) != ("sdpa",)
+                or not self.last_position_logits
+                or self.pilot_images < 4
+            ):
+                raise ValueError(
+                    "tas-batched-study-v1 fixes SDPA, packed views, B=4, last-position logits and at least four pilot images."
+                )
         if not 0 <= self.sigma_ratio <= 1 or not 0 < self.yolo_conf <= 1:
             raise ValueError("Invalid blur or detection configuration.")
         if self.expansion_ratio != 0:
@@ -149,6 +165,17 @@ class StudyConfig:
 
     def as_dict(self):
         return dataclasses.asdict(self)
+
+    @property
+    def fixed_execution_policy(self):
+        if self.execution_protocol == "strict":
+            return None
+        return {
+            "backend": "sdpa",
+            "execution": "packed",
+            "batch_images": 4,
+            "last_position_logits": True,
+        }
 
     @classmethod
     def from_dict(cls, value):

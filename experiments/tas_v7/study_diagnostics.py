@@ -413,11 +413,18 @@ def run_diagnostics(study, finalist=None):
             prepared_overrides=values,
             reuse_from=(original_records, original_report),
         )
+    probe_execution = {
+        **study.policy,
+        "batch_images": 1,
+        "views": ["ORIG", "OBJ-H", "BH", "FG-U"],
+        "scope": "fixed-prefix diagnostic; separate from caption batch numerics",
+    }
     probe_inputs = canonical_hash(
         {
             "study": study.identity,
             "generation": study.config.generation,
             "execution": study.policy,
+            "probe_execution": probe_execution,
             "methods": [method.to_dict() for method in methods],
             "rows": rows,
             "annotation_sha256": annotations_sha256,
@@ -496,6 +503,8 @@ def run_diagnostics(study, finalist=None):
                         for name in ("S_context", "S_remove", "S_blur")
                     },
                     "measurement_temperature": 1.0,
+                    "execution_protocol": study.config.execution_protocol,
+                    "probe_execution": probe_execution,
                     "before_filter": True,
                     "interpretation": probe["interpretation"],
                 }
@@ -512,6 +521,9 @@ def run_diagnostics(study, finalist=None):
             "influence": "fixed-prefix-influence.jsonl",
             "paired_interventions": comparison_path.name,
             "probe_inputs": probe_inputs,
+            "caption_execution_protocol": study.config.execution_protocol,
+            "caption_execution_policy": study.policy,
+            "probe_execution": probe_execution,
             "influence_sha256": sha256_file(influence_path),
             "comparison_sha256": sha256_file(comparison_path),
             "automatically_run": ["D-PRED", *overrides],

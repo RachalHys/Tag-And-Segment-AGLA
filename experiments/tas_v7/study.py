@@ -277,7 +277,7 @@ def _reuse_screen_records(ledger, identity, source):
         raise ArtifactError("Only complete, unmodified screen samples can seed controls.")
     # Exact row ORDER is required: FP16 results can depend on batch companions,
     # row positions and padding, even with independent per-image RNG streams.
-    for name in ("study", "rows", "generation", "seeds", "execution", "partial_batch"):
+    for name in ("study", "rows", "generation", "seeds", "execution", "partial_batch", "execution_protocol"):
         if canonical_hash(identity[name]) != canonical_hash(previous.get(name)):
             raise ArtifactError(f"Screen/control reuse identity differs: {name}.")
     source_methods = {method["id"]: method for method in previous["methods"]}
@@ -332,7 +332,7 @@ def _reuse_diagnostic_records(ledger, identity, source, overrides, prompts):
         or previous.get("interventions") or not overrides
     ):
         raise ArtifactError("Diagnostic reuse needs complete D-PRED records and explicit intervention inputs.")
-    for name in ("study", "rows", "generation", "seeds", "modes", "execution", "partial_batch"):
+    for name in ("study", "rows", "generation", "seeds", "modes", "execution", "partial_batch", "execution_protocol"):
         if canonical_hash(identity[name]) != canonical_hash(previous.get(name)):
             raise ArtifactError(f"Diagnostic reuse identity differs: {name}.")
     source_methods = {method["id"]: method for method in previous["methods"]}
@@ -445,6 +445,10 @@ class Study:
             "namespace": "tas-v7",
             "generation": dataclasses.asdict(self.config.generation),
             "last_position_logits": self.config.last_position_logits,
+            "execution": {
+                "protocol": self.config.execution_protocol,
+                "fixed_policy": self.config.fixed_execution_policy,
+            },
             "dataset_kind": self.config.dataset,
             "source": self.source,
             "model_assets": self.work["assets"]["identity"],
@@ -611,6 +615,12 @@ class Study:
         atomic_json(self.persistent_run / "audit/audit.json", result)
         self.policy = result["selected_policy"]
         print(f"P0 passed. Locked execution policy: {self.policy}", flush=True)
+        if self.config.execution_protocol != "strict":
+            print(
+                f"Experimental execution protocol: {self.config.execution_protocol}; "
+                "pilot token drift is reported, not a quality-equivalence claim.",
+                flush=True,
+            )
         return result
 
     def collection(
@@ -656,6 +666,7 @@ class Study:
             "generation": dataclasses.asdict(self.config.generation),
             "modes": modes,
             "execution": self.policy,
+            "execution_protocol": self.config.execution_protocol,
             "partial_batch": "repeat-last-image; discard padded outputs",
             "interventions": {
                 str(key): {
@@ -833,6 +844,7 @@ class Study:
                                         "response": caption,
                                         "method": method.id,
                                         "protocol": method.protocol,
+                                        "execution_policy": dict(self.policy),
                                         "seed": seed,
                                         "generation_mode": mode,
                                         "prompt": text,
@@ -1056,6 +1068,8 @@ class Study:
                     count=self.config.shortlist_count,
                     coverage_tolerance=self.config.coverage_tolerance,
                 )
+                selection["execution_protocol"] = self.config.execution_protocol
+                selection["execution_policy"] = dict(self.policy)
                 if (
                     selection_path.exists()
                     and json.loads(selection_path.read_text())["selected"]
@@ -1133,6 +1147,8 @@ class Study:
             "run_id": getattr(self, "run_id", None),
             "reports": self.stage_reports,
             "elapsed_seconds": time.monotonic() - self.started,
+            "execution_protocol": self.config.execution_protocol,
+            "execution_policy": getattr(self, "policy", None),
             "deferred": [
                 "P3 adaptive",
                 "P4 prompts/branch selection",

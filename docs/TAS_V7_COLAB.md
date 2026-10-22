@@ -6,12 +6,34 @@ the fixed public baseline and restores the experiment modules automatically.
 Only the notebook needs to be uploaded to Colab.
 
 The notebook defaults to `STAGE="flow"` and runs the full implemented first-round
-study. P0 automatically selects and freezes a passing execution policy, then
-continues through smoke, screening and the eligible subsequent stages below.
-No manual execution-policy selection is needed. A session budget saves progress
-for the next Run all.
+study with `EXECUTION_PROTOCOL="tas-batched-study-v1"`: **SDPA, packed visual
+branches, B=4 and last-position logits**. This explicit research protocol accepts
+reported token drift from batched FP16 computation. Native E0/E1 B=1 reproduction,
+geometry, fixed-prefix numerical and filtered-support checks remain blocking.
+P0 checks fixed-prefix logits/support for all 14 methods and matched E0-H/E1-H
+baselines against immutable raw-per-image, eager/full-head references. Short
+greedy/sample drift probes cover E0/E1/F4; P0 does not generate complete serial
+captions for all 16 configurations. It then runs smoke, screening and the eligible
+stages below, checking one fixed policy without the old 24-option sweep. A session
+budget saves progress for the next Run all. There is no silent batch or precision
+fallback.
 
-`STAGE="audit"` is an optional short performance investigation. It runs P0,
+The user's A100 40 GB comparison measured **6.6× TAG and 7.9× F4 warm generation
+speedups** for packed B=4, with peak allocation 22.3 GiB. FlashAttention kernels
+were already active through SDPA. These are four-image, one-seed observations;
+they establish neither all-method quality equivalence nor whole-study speed.
+The new protocol is for quick hypothesis testing, not official native evaluation.
+Weights remain FP16; LEGACY keeps native arithmetic and HARMONIZED fusion math
+is FP32. Generation/cohort settings are unchanged.
+Every study method, baseline and control uses the same frozen execution policy.
+Changed identities keep this study separate from earlier strict outputs.
+
+Set `EXECUTION_PROTOCOL="strict"` in the settings cell before outputs to restore
+exact-token policy selection. Its settings derive the original B=1/2/4,
+eager/SDPA and serial/packed search. The API also retains strict defaults.
+
+`STAGE="audit"` is an optional short performance investigation, built with strict
+defaults. It runs P0,
 profiles one warmed 24-token F4 call and stops before smoke. Its profile never
 supplies policy-selection timings. CUDA-profiler unavailability is reported
 without changing P0; generation errors still stop the run. Completed P0 evidence
@@ -54,7 +76,9 @@ This is a **descriptive pilot**, not a test establishing equivalence. One seed
 and four already-inspected development images cannot validate all 14 methods or
 held-out quality. A confidence interval containing zero is not equivalence.
 The two-point shortlist coverage rule supplies no execution-equivalence margin.
-No rejected policy is promoted to strict P0 or automatically used in full flow.
+The comparison never promotes a rejected policy to strict P0 or automatically
+changes full flow. The named batched study above is a separate, explicitly
+authorized research protocol; its descriptive token drift is not strict parity.
 The comparison saves `batch-comparison-*/comparison.json`, `discovery.json`,
 `changed-captions.jsonl` and per-policy results in its own run directory, then
 releases the runtime. Completed captions resume without regeneration.
@@ -71,11 +95,10 @@ releases the runtime. Completed captions resume without regeneration.
 4. Run again after a session ends. Completed results and perception caches are
    reused. Keep the same persistent root in future idea notebooks.
 
-Defaults use `REQUIRE_A100_80GB=False` and `BATCH_SIZES=[1, 2, 4]` for the observed
-A100 40 GB runtime. Serial views and packed views both test image batches;
-rejected last-position heads also test their full-head alternative. Larger
-batch candidates can be tested separately on 80 GB;
-the blocking P0 audit still selects and freezes the execution policy.
+Defaults use `REQUIRE_A100_80GB=False`, `BATCH_SIZES=[4]`, `EXECUTION="packed"`,
+`ATTENTION_BACKENDS=["sdpa"]` and `PILOT_IMAGES=4` for the measured A100 40 GB
+policy. Keep them fixed for the batched study. Insufficient memory or a failed
+blocking check stops with its evidence; it does not silently downgrade the run.
 Final partial batches repeat the last input to preserve that shape and discard
 the padded outputs. Reports distinguish real images from the execution batch.
 
@@ -98,8 +121,9 @@ process is still running; it is not a percentage-complete or GPU-use claim.
 Named stages and text bars show model bytes, prepared images, P0 references,
 execution options and captions. Caption bars include rate, ETA and the last
 measured generation time. Updates are outside token-level model execution.
-Rejected-caption comparisons include the first differing token and measured
-prefill/decode time; a passing numerical snapshot alone cannot make them eligible.
+Caption drift reports include differing tokens and measured prefill/decode time.
+Strict mode rejects caption mismatches; the named batched study records them
+without claiming exact equivalence. Both modes block numerical/support failures.
 P0 generates raw reference captions only for images a requested or locked batch
 can consume; additional preview images do not trigger unused generation.
 
@@ -139,14 +163,15 @@ stop without forcing a finalist.
 Native E0/E1 use the LEGACY protocol. New policies and E0-H/E1-H use HARMONIZED;
 compare within protocols. FG-U blurs foreground only and preserves background.
 New probability math is FP32; weights remain FP16. P0 checks native baselines,
-geometry, filtered support and serial/batched behavior before selecting an
-execution policy. Rejected options are recorded; the chosen policy stays fixed.
+geometry, filtered support and execution behavior. Strict mode selects a passing
+policy; the batched study validates its fixed policy with reported token drift.
+The execution protocol and policy are visible in audit/report displays.
 
 Cached visual tensors are encoded individually with the native image batch size
 of one, then reused across methods and batched language decoding. FP16 results
 can depend on computation shape, as described in
 [PyTorch's numerical accuracy notes](https://github.com/pytorch/pytorch/blob/v2.4.1/docs/source/notes/numerical_accuracy.rst).
-If every requested optimization is rejected, P0 also tests eager, serial,
+In strict mode, if every requested optimization is rejected, P0 also tests eager, serial,
 single-image decoding with the full vocabulary head. This option must pass the
 same checks; tolerances and token/support requirements are unchanged. The head
 choice is saved in the locked execution policy and restored on reconnect.
@@ -206,6 +231,7 @@ python tools/build_colab_notebook.py --commit <tested-implementation-commit> --s
 
 The tests passed from source restored by the notebook itself over a fresh public
 baseline clone. Notebook schema/cell syntax, compilation and lint passed.
-Full-checkpoint Colab/A100 execution and the optional full AMBER scorer remain
-unrun locally. P0 must pass on the actual GPU before bulk generation; no measured
-speedup or scientific improvement is claimed by the local fixtures.
+The integrated full batched study and optional full AMBER scorer remain unrun
+locally. P0 must pass on the actual GPU before bulk generation; local fixtures
+do not establish measured speed or scientific quality. The small A100 comparison
+above is separate evidence, with the stated sample and timing limitations.
