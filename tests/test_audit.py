@@ -163,6 +163,35 @@ def test_locked_policy_rechecks_only_the_locked_option(pilot_case, tmp_path):
     assert len(second["pilot"]) == 1
 
 
+def test_unused_preview_images_do_not_generate_reference_captions(pilot_case, tmp_path, monkeypatch):
+    runtime, config, rows, prepared = pilot_case
+    first = runtime.backend.prefill
+    extra = {"image_id": 99, "query": rows[0]["query"]}
+    unused = {"pixels": {name: pixel + 5 for name, pixel in prepared[0]["pixels"].items()}, "metadata": {}}
+
+    def guarded(ids, images):
+        if images.ndim == 4:
+            assert all(not torch.equal(images[0].cpu(), pixel) for pixel in unused["pixels"].values())
+        return first(ids, images)
+
+    monkeypatch.setattr(runtime.backend, "prefill", guarded)
+    result = audit_and_pilot(runtime, replace(config, pilot_images=3), rows + [extra],
+                             prepared + [unused], tmp_path / "audit")
+    assert result["execution_reference"]["image_ids"] == [row["image_id"] for row in rows]
+    assert result["selected_policy"]["batch_images"] == 2
+
+
+def test_locked_shape_cannot_be_silently_reduced_to_a_smaller_pilot(pilot_case, tmp_path):
+    runtime, config, rows, prepared = pilot_case
+    directory = tmp_path / "audit"
+    directory.mkdir()
+    (directory / "execution-policy.json").write_text(json.dumps({
+        "backend": "eager", "execution": "packed", "batch_images": 4, "last_position_logits": True,
+    }))
+    with pytest.raises(ValueError, match="locked execution batch"):
+        audit_and_pilot(runtime, config, rows, prepared, directory)
+
+
 def test_snapshot_support_uses_original_native_dtype():
     first = [{"ORIG": torch.tensor([[10.0, 9.3046875]], dtype=torch.float16)}]
     second = [{"ORIG": torch.tensor([[10.0, 9.296875]], dtype=torch.float16)}]

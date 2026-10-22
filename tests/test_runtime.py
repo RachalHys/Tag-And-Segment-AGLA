@@ -206,4 +206,37 @@ def test_per_image_eos_and_token_broadcast():
         [1, 2],
     )
     assert result.token_ids == [[2], [3, 2]]
+    assert result.stop_reasons == ["eos_or_stop", "eos_or_stop"]
     assert backend.advances[0].squeeze().tolist() == [2, 3, 2, 3]
+
+
+@pytest.mark.parametrize("execution", ["serial", "packed"])
+@pytest.mark.parametrize("sample", [False, True])
+def test_stop_metadata_handles_early_eos_last_step_sequence_and_token_limit(execution, sample):
+    from tas_runtime.decoding import ForwardState
+
+    class Backend:
+        def scores(self, rows, step):
+            logits = torch.full((len(rows), 8), -100.0)
+            for index, row in enumerate(rows.tolist()):
+                token = 2 if row == 0 else (5 + step) if row == 1 else 3
+                logits[index, token] = 100.0
+            return logits
+
+        def prefill(self, ids, images):
+            return ForwardState(self.scores(ids[:, 0], 0), ids[:, 0], 1)
+
+        def advance(self, tokens, state):
+            # The terminal token enters the cache, then subsequent positions pad.
+            assert tokens[state.past == 0].eq(2 if state.length == 1 else 0).all()
+            return ForwardState(self.scores(state.past, state.length), state.past, state.length + 1)
+
+    result = decode_branches(
+        Backend(), torch.arange(3).reshape(3, 1),
+        {"ORIG": torch.zeros(3, 1), "OBJ-H": torch.zeros(3, 1)},
+        lambda logits: logits["ORIG"], None,
+        DecodeOptions(do_sample=sample, max_new_tokens=3, stop_token_sequences=((5, 6, 7),)),
+        [11, 22, 33], execution=execution,
+    )
+    assert result.token_ids == [[2], [5, 6, 7], [3, 3, 3]]
+    assert result.stop_reasons == ["eos_or_stop", "eos_or_stop", "max_new_tokens"]

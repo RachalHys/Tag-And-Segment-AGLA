@@ -56,7 +56,7 @@ def summarize(records):
         p95_amortized_seconds_per_image=float(np.percentile(elapsed, 95)),
         peak_memory_bytes=max(row.get("peak_memory_bytes", 0) for row in records),
         reused_captions=sum("reused_from_stage" in row for row in records),
-        cost_scope="measured warm decoder prefill+decode; reused captions retain original timings; current-session execution, features, perception, storage and setup reported separately",
+        cost_scope="measured warm decoder prefill+decode; reused captions retain original timings; current-session generation/features/perception and stage wall time are in metadata; global setup is included only in session elapsed time",
         latency_scope="elapsed prefill+decode until the whole image batch returns; no queue/setup/perception time",
     )
     return result

@@ -130,6 +130,15 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     locked_policy = (
         json.loads(policy_path.read_text()) if policy_path.exists() else None
     )
+    available = min(config.pilot_images, len(rows), len(prepared))
+    if available < 1:
+        raise ValueError("P0 needs at least one prepared pilot image.")
+    reference_count = (
+        locked_policy["batch_images"] if locked_policy is not None
+        else max((count for count in config.batch_sizes if count <= available), default=1)
+    )
+    if reference_count > available:
+        raise ValueError("The locked execution batch exceeds the available pilot images; preserve its shape when resuming.")
     report = {
         "environment": environment_manifest(),
         "baseline_checks": [],
@@ -252,7 +261,9 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     finally:
         runtime.backend.last_position_logits = original_last
 
-    pilot_rows = rows[: config.pilot_images]
+    # Only these rows can be consumed by a candidate. Extra configured preview
+    # images never contributed to a check; do not generate unused raw captions.
+    pilot_rows = rows[:reference_count]
     pilot_prepared = prepared[: len(pilot_rows)]
     # Audit the native baselines as well as the expensive V=3 topology. Every
     # candidate uses the same cached-feature path as the actual study, compared
@@ -329,6 +340,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         synchronize(runtime.device)
         report["feature_preparation_seconds"] = time.perf_counter() - feature_start
     report["execution_reference"] = {
+        "image_ids": [row["image_id"] for row in pilot_rows],
         "methods": [method.id for method in pilot_methods],
         "input": "per-image raw pixels; eager attention; full-position vocabulary head",
         "candidate_input": "cached projected features; selected head, attention and batch policy",

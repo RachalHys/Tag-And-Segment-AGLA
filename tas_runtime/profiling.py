@@ -147,5 +147,6 @@ def environment_manifest():
         "gpus": devices,
         "git_commit": revision,
         "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+        "fp16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
         "cudnn_benchmark": torch.backends.cudnn.benchmark,
     }

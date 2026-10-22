@@ -417,6 +417,19 @@ def build(
                 show_table([("Image", "Method", "Reference caption", "Batched caption")] + [(item["image_id"], item["method"], item["reference_caption"], item["candidate_caption"]) for item in examples])
             for operators in sorted(comparison.parent.glob("profile-*/operators.txt")):
                 display(HTML("<details><summary>Sampled " + html.escape(operators.parent.name) + " operator profile</summary><pre>" + html.escape(operators.read_text()) + "</pre></details>"))
+        diagnostic_pairs = run_dir / "diagnostics/paired-interventions.json"
+        if diagnostic_pairs.exists():
+            value = json.loads(diagnostic_pairs.read_text())
+            display(Markdown("**Paired perception interventions:** " + value["scope"]))
+            cells = [("Intervention", "Method", "Applied images", "Mask changed", "CHAIRi delta (pp), 95% CI", "Coverage delta (pp), 95% CI")]
+            def interval(result):
+                if result.get("status") == "undefined":
+                    return "undefined"
+                return "{:+.2f} [{:+.2f}, {:+.2f}]".format(*(100 * result[key] for key in ("delta_candidate_minus_baseline", "ci_low", "ci_high")))
+            for item in value["comparisons"]:
+                metrics = {result["metric"]: result for result in item["paired"]}
+                cells.append((item["intervention"], item["method"], len(item["applied_image_ids"]), len(item["mask_changed_image_ids"]), interval(metrics["CHAIRi"]), interval(metrics["category_coverage"])))
+            show_table(cells)
         for summary in sorted(run_dir.glob("*/summary.csv")):
             rows = list(csv.reader(summary.open()))
             display(Markdown("**" + summary.parent.name + "**"))

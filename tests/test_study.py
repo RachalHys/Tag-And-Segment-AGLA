@@ -249,6 +249,124 @@ def test_diagnostic_pipeline_reruns_sam_and_keeps_mask_quality_metadata_aligned(
     run.close()
 
 
+@pytest.mark.parametrize("changed_inputs,expected_calls", [
+    (("LEGACY_OBJ-H", "OBJ-H"), ["E1", "F4"]),
+    (("ORIG",), ["E0", "E1", "F4"]),
+])
+def test_diagnostic_reuse_preserves_companions_and_target_provenance(study, monkeypatch, changed_inputs, expected_calls):
+    from experiments.tas_v7 import audit
+
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    originals, source_report = run.collection("diagnostics-D-PRED", rows, methods, seeds=(0,))
+    prepared, _ = run.prepare_rows(rows)
+    overrides = {row["image_id"]: item for row, item in zip(rows, prepared)}
+    for item in prepared:
+        item["metadata"]["diagnostic"] = "D-MASK"
+    # Only one companion changes. Neither real row of that method may reuse
+    # old batch results, even though the other row's own input is unchanged.
+    for name in changed_inputs:
+        prepared[1]["pixels"][name] = prepared[1]["pixels"][name] + 0.1
+    generate, calls = audit.generate, []
+
+    def observed(*args, **kwargs):
+        calls.append(args[2].id)
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "generate", observed)
+    records, report = run.collection(
+        "diagnostics-D-MASK", rows, methods, seeds=(0,),
+        prepared_overrides=overrides, reuse_from=(originals, source_report),
+    )
+    assert calls == expected_calls
+    assert report["metadata"]["reused_outputs"] == (len(rows) if "E0" not in expected_calls else 0)
+    costs = report["metadata"]["shared_stage_cost"]
+    assert costs["wall_seconds_until_report"] >= costs["new_generation_seconds"] > 0
+    assert costs["new_generated_outputs"] == len(expected_calls) * len(rows)
+    assert costs["imported_outputs"] == report["metadata"]["reused_outputs"]
+    reference = {row["image_id"]: row for row in originals if row["method"] == "E0"}
+    for row in records:
+        if row["method"] == "E0" and "E0" not in expected_calls:
+            assert row["token_ids"] == reference[row["image_id"]]["token_ids"]
+            assert row["reused_from_stage"].startswith("diagnostics-D-PRED-")
+            assert row["view_metadata"]["diagnostic"] == "D-MASK"
+        else:
+            assert "reused_from_stage" not in row
+
+
+def test_unchanged_diagnostic_inputs_reuse_every_method_without_inference(study, monkeypatch):
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    originals, source_report = run.collection("diagnostics-D-PRED", rows, methods, seeds=(0,))
+    prepared, _ = run.prepare_rows(rows)
+    overrides = {row["image_id"]: item for row, item in zip(rows, prepared)}
+    for item in prepared:
+        item["metadata"]["intervention_status"] = "no_matched_instances"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Identical diagnostic views need no new inference")
+
+    monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
+    records, report = run.collection(
+        "diagnostics-D-MISS", rows, methods, seeds=(0,),
+        prepared_overrides=overrides, reuse_from=(originals, source_report),
+    )
+    assert len(records) == len(originals) == report["metadata"]["reused_outputs"]
+    assert report["metadata"]["shared_stage_cost"]["new_generation_seconds"] == 0
+    assert report["metadata"]["shared_stage_cost"]["new_generated_outputs"] == 0
+    assert report["metadata"]["shared_stage_cost"]["imported_outputs"] == len(records)
+
+
+def test_changed_diagnostic_pixels_get_a_new_identity_even_with_identical_area_metadata(study, monkeypatch):
+    from experiments.tas_v7 import audit
+
+    run, rows = study
+    methods = [method_by_id(name) for name in ("E0", "E1", "F4")]
+    original, original_report = run.collection("diagnostics-D-PRED", rows, methods, seeds=(0,))
+    prepared, _ = run.prepare_rows(rows)
+    overrides = {row["image_id"]: item for row, item in zip(rows, prepared)}
+    run.collection("diagnostics-D-MASK", rows, methods, seeds=(0,),
+                   prepared_overrides=overrides, reuse_from=(original, original_report))
+    first_directory = run.stage_reports["diagnostics-D-MASK"]
+    generate, calls = audit.generate, []
+
+    def observed(*args, **kwargs):
+        calls.append(args[2].id)
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "generate", observed)
+    # Mutate the SAME prepared dictionary after its fingerprints were checked.
+    # Metadata and source image bytes remain unchanged; pixels must still differ.
+    overrides[rows[0]["image_id"]]["pixels"]["ORIG"].add_(0.25)
+    run.collection("diagnostics-D-MASK", rows, methods, seeds=(0,),
+                   prepared_overrides=overrides, reuse_from=(original, original_report))
+    assert calls == ["E0", "E1", "F4"]
+    assert run.stage_reports["diagnostics-D-MASK"] != first_directory
+    assert Path(first_directory).exists()
+
+
+@pytest.mark.parametrize("field", ["study", "rows", "generation", "seeds", "execution", "partial_batch", "modes"])
+def test_diagnostic_reuse_rejects_changed_protocol_before_inference(study, monkeypatch, field):
+    from copy import deepcopy
+    from tas_runtime.artifacts import ArtifactError
+
+    run, rows = study
+    methods = [method_by_id("E0")]
+    originals, source_report = run.collection("diagnostics-D-PRED", rows, methods, seeds=(0,))
+    prepared, _ = run.prepare_rows(rows)
+    source_report = deepcopy(source_report)
+    source_report["metadata"]["identity"][field] = "different"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Incompatible diagnostic reuse must stop before inference")
+
+    monkeypatch.setattr(run.runtime.backend, "prefill", forbidden)
+    with pytest.raises(ArtifactError, match="Diagnostic reuse identity differs"):
+        run.collection("diagnostics-D-MASK", rows, methods, seeds=(0,),
+                       prepared_overrides={row["image_id"]: item for row, item in zip(rows, prepared)},
+                       reuse_from=(originals, source_report))
+
+
 def test_budget_is_a_resumable_stop(study):
     run, _ = study
     run.deadline = 0

@@ -170,7 +170,6 @@ def decode_branches(
     )
     finished = torch.zeros(batch, dtype=torch.bool, device=device)
     lengths = torch.zeros(batch, dtype=torch.long, device=device)
-    reasons = ["max_new_tokens"] * batch
     eos = torch.tensor(options.eos_token_ids, dtype=torch.long, device=device)
     stop_sequences = [
         torch.tensor(seq, dtype=torch.long, device=device)
@@ -201,10 +200,6 @@ def decode_branches(
                 stop |= (
                     generated[:, step + 1 - sequence.numel() : step + 1] == sequence
                 ).all(dim=-1)
-        newly_finished = stop & ~finished
-        if newly_finished.any():
-            for index in newly_finished.nonzero(as_tuple=True)[0].tolist():
-                reasons[index] = "eos_or_stop"
         finished |= stop
         if finished.all() or step + 1 == options.max_new_tokens:
             break
@@ -216,6 +211,9 @@ def decode_branches(
     elapsed = time.perf_counter() - decode_start
     token_rows = generated.cpu().tolist()
     size_rows = lengths.cpu().tolist()
+    # Stop reasons are output metadata. Read them once after generation instead
+    # of synchronizing the GPU for newly_finished.any()/nonzero() at every token.
+    reasons = ["eos_or_stop" if stopped else "max_new_tokens" for stopped in finished.cpu().tolist()]
     return DecodeResult(
         [row[:length] for row, length in zip(token_rows, size_rows)],
         reasons,

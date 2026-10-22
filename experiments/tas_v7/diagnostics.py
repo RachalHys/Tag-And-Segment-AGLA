@@ -115,6 +115,8 @@ def replace_same_instance_evidence(
             )
     return output, {
         "intervention": "D-MASK" if component == "mask" else "D-BOX",
+        "applied": bool(matches),
+        "status": "applied" if matches else "no_match",
         "same_instance_matches": dict(matches),
         "instance_count_before": len(predicted),
         "instance_count_after": len(output),
@@ -137,8 +139,43 @@ def remove_verified_instance(
         instance for instance in instances if instance.instance_id != instance_id
     ], {
         "intervention": "D-MISS",
+        "applied": True,
+        "status": "applied",
         "removed_instance_id": instance_id,
         "verified_present": True,
+        "presence_evidence": "independently verified",
+        "instance_count_before": len(instances),
+        "instance_count_after": len(instances) - 1,
+    }
+
+
+def remove_annotation_matched_instance(
+    instances: Sequence[InstanceEvidence], instance_id: str, *, annotation_id: str
+) -> tuple[list[InstanceEvidence], dict]:
+    """Delete one provisionally matched prediction without claiming verification.
+
+    A class/box correspondence supports an annotation-scoped diagnostic, but
+    does not independently verify that prediction's physical instance identity.
+    """
+    if (
+        not annotation_id
+        or sum(instance.instance_id == instance_id for instance in instances) != 1
+    ):
+        raise ValueError(
+            "Annotation-supported removal needs one instance and an annotation id"
+        )
+    return [
+        instance for instance in instances if instance.instance_id != instance_id
+    ], {
+        "intervention": "D-MISS",
+        "applied": True,
+        "status": "applied",
+        "removed_instance_id": instance_id,
+        "annotation_id": annotation_id,
+        "verified_present": False,
+        "presence_evidence": "provisional annotation class/box match; requires review",
+        "instance_count_before": len(instances),
+        "instance_count_after": len(instances) - 1,
     }
 
 

@@ -94,6 +94,8 @@ execution options and captions. Caption bars include rate, ETA and the last
 measured generation time. Updates are outside token-level model execution.
 Rejected-caption comparisons include the first differing token and measured
 prefill/decode time; a passing numerical snapshot alone cannot make them eligible.
+P0 generates raw reference captions only for images a requested or locked batch
+can consume; additional preview images do not trigger unused generation.
 
 ## Experiment flow
 
@@ -107,6 +109,18 @@ controls. It requires identical ordered images, methods, seeds, generation and
 execution identities. Greedy and modified controls run independently. Reports
 mark reused captions, retain their original measured costs and separate new
 decoder time in stage metadata.
+
+Perception diagnostics also reuse completed D-PRED captions when every named
+visual tensor, prompt, seed, method and execution setting matches. The entire
+batch, including companions and final padding, must be unchanged. This avoids
+225 duplicate E0 captions in the default 75-image, three-intervention audit;
+unchanged no-match cases can reuse other methods as well. Destination records
+retain the intervention metadata and source provenance. New generation costs
+are separate from reused measurements.
+Stage metadata also records current-session wall time through report construction
+and counts imported, previously completed and newly generated outputs. This
+includes CPU/scoring/retry/storage overhead; global model restore/load time is
+included in the session elapsed time instead.
 
 The approved shortlist rule permits **at most two percentage points of measured
 coverage loss** versus harmonized TAG (`COVERAGE_TOLERANCE_PP=2.0`, absolute
@@ -138,7 +152,13 @@ image; older records without latency measurements report it as unavailable.
 Diagnostics use provisional annotation matches; they do not establish causal
 explanations or guaranteed oracle bounds.
 Caption quality and ambiguous object mentions still need scientific review.
-Automatic P0-D runs D-PRED, D-MASK, D-BOX and D-MISS. D-FALSE and phrase-utility
+Automatic P0-D runs D-PRED, D-MASK, D-BOX and D-MISS. Annotation-supported
+D-MISS targets remain provisional; they are not marked independently verified.
+No-match interventions record unchanged counts. The audit records matched mask
+IoU and areas; a separate CPU report displays within-method paired intervention
+deltas and image-bootstrap intervals, retaining no-op images and undefined
+denominators. These supervised perturbations do not prove causal headroom.
+D-FALSE and phrase-utility
 checks require independently verified examples and remain manual research steps;
 the notebook does not infer verified absence from missing COCO annotations.
 

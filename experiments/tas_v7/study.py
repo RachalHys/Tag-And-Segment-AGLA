@@ -318,6 +318,75 @@ def _reuse_screen_records(ledger, identity, source):
     return copied
 
 
+def _reuse_diagnostic_records(ledger, identity, source, overrides, prompts):
+    """Reuse only whole batches with identical per-method visual inputs."""
+    from .methods import MethodSpec
+
+    records, report = source
+    metadata = report.get("metadata", {})
+    previous = metadata.get("identity", {})
+    if (
+        identity["stage"] not in {"diagnostics-D-MASK", "diagnostics-D-BOX", "diagnostics-D-MISS"}
+        or previous.get("stage") != "diagnostics-D-PRED"
+        or not metadata.get("complete") or report.get("failures")
+        or previous.get("interventions") or not overrides
+    ):
+        raise ArtifactError("Diagnostic reuse needs complete D-PRED records and explicit intervention inputs.")
+    for name in ("study", "rows", "generation", "seeds", "modes", "execution", "partial_batch"):
+        if canonical_hash(identity[name]) != canonical_hash(previous.get(name)):
+            raise ArtifactError(f"Diagnostic reuse identity differs: {name}.")
+    source_methods = {method["id"]: method for method in previous["methods"]}
+    indexed = {
+        canonical_hash(_caption_key(row, row["method"], row["seed"], row["generation_mode"])): row
+        for row in records
+    }
+    expected = {
+        canonical_hash(_caption_key(row, method, seed, mode))
+        for row in previous["rows"] for method in source_methods
+        for mode in previous["modes"]
+        for seed in (previous["seeds"] if mode == "sample" else previous["seeds"][:1])
+    }
+    if (
+        set(indexed) != expected or len(records) != len(expected)
+        or report.get("completed_outputs") != len(expected)
+        or report.get("expected_outputs") != len(expected)
+    ):
+        raise ArtifactError("Completed D-PRED records are missing, duplicated or unexpected.")
+    source_stage = previous["stage"] + "-" + canonical_hash(previous)[:12]
+    count, copied = identity["execution"]["batch_images"], 0
+    for specification in identity["methods"]:
+        if canonical_hash(specification) != canonical_hash(source_methods.get(specification["id"])):
+            continue
+        method = MethodSpec(**{**specification, "views": tuple(specification["views"])})
+        for group in _groups_by_prompt_length(identity["rows"], prompts):
+            for start in range(0, len(group), count):
+                batch = group[start : start + count]
+                for mode in identity["modes"]:
+                    for seed in identity["seeds"] if mode == "sample" else identity["seeds"][:1]:
+                        sources = [indexed[canonical_hash(_caption_key(row, method.id, seed, mode))] for row in batch]
+                        if not all(
+                            row["image_id"] in overrides
+                            and original.get("input_fingerprints") == identity["interventions"][str(row["image_id"])]["inputs"][method.id]
+                            for row, original in zip(batch, sources)
+                        ):
+                            continue
+                        # Real rows AND padding companions have the same pixels,
+                        # prompt, positions, RNG streams, order and execution shape.
+                        for row, original in zip(batch, sources):
+                            key = _caption_key(row, method.id, seed, mode)
+                            if ledger.completed(key):
+                                continue
+                            target = overrides[row["image_id"]]
+                            ledger.record(key, {
+                                **original, "reused_from_stage": source_stage,
+                                "view_metadata": target["metadata"],
+                                "perception_key": target["perception_key"],
+                                "perception_metadata": target["perception"].metadata,
+                            })
+                            copied += 1
+    return copied
+
+
 class Study:
     def __init__(self, config: StudyConfig, project_root=None):
         self.config = config
@@ -557,12 +626,14 @@ class Study:
     ):
         import torch
 
+        stage_started = time.perf_counter()
+
         from tas_runtime.decoding import record_seed
         from tas_runtime.persistence import publish_ledger, restore_ledger
         from tas_runtime.profiling import synchronize
 
         from .audit import generate
-        from .prepared import method_features, prepare_feature_batch
+        from .prepared import input_fingerprints, method_features, prepare_feature_batch
         from .report import write_report
 
         seeds = tuple(self.config.seeds if seeds is None else seeds)
@@ -587,7 +658,11 @@ class Study:
             "execution": self.policy,
             "partial_batch": "repeat-last-image; discard padded outputs",
             "interventions": {
-                str(key): value["metadata"]
+                str(key): {
+                    "metadata": value["metadata"],
+                    "perception_key": value["perception_key"],
+                    "inputs": {method.id: input_fingerprints(value, method) for method in methods},
+                }
                 for key, value in (prepared_overrides or {}).items()
             },
         }
@@ -615,6 +690,7 @@ class Study:
         completed_count = sum(
             row["status"] == "ok" for row in ledger.records(latest=True)
         )
+        initially_completed, copied = completed_count, 0
         report_path = destination / "report.json"
         if completed_count == expected and report_path.exists():
             report = json.loads(report_path.read_text())
@@ -630,12 +706,20 @@ class Study:
                     for row in ledger.records(latest=True)
                     if row["status"] == "ok"
                 ], report
+        prompts = {
+            query: self.runtime.prompt(query, self.config.generation.conv_mode)
+            for query in dict.fromkeys(row["query"] for row in rows)
+        }
         if reuse_from is not None:
-            copied = _reuse_screen_records(ledger, identity, reuse_from)
+            copied = (
+                _reuse_diagnostic_records(ledger, identity, reuse_from, prepared_overrides, prompts)
+                if stage.startswith("diagnostics-")
+                else _reuse_screen_records(ledger, identity, reuse_from)
+            )
             if copied:
                 publish_ledger(ledger, snapshots)
                 completed_count += copied
-                print(f"{stage}: reused {copied} exact sampled captions from screen.", flush=True)
+                print(f"{stage}: reused {copied} captions with identical inputs and execution.", flush=True)
         scorer = (
             _scorer(self.work["data_root"], rows)
             if self.config.dataset == "coco" and completed_count < expected
@@ -646,10 +730,6 @@ class Study:
         try:
             # Methods and seeds share immutable prompt text/IDs. KV state and
             # generated prefixes remain independent in the decoder.
-            prompts = {
-                query: self.runtime.prompt(query, self.config.generation.conv_mode)
-                for query in dict.fromkeys(row["query"] for row in rows)
-            }
             for group in _groups_by_prompt_length(rows, prompts):
                 for start in range(0, len(group), self.policy["batch_images"]):
                     batch = group[start : start + self.policy["batch_images"]]
@@ -781,6 +861,8 @@ class Study:
                                     }
                                     if "execution_protocol" in identity:
                                         payload["execution_protocol"] = identity["execution_protocol"]
+                                    if stage.startswith("diagnostics-"):
+                                        payload["input_fingerprints"] = input_fingerprints(item, method)
                                     if scorer:
                                         payload = scorer.score(
                                             row["image_id"],
@@ -829,6 +911,12 @@ class Study:
             latest = ledger.records(latest=True)
             records = [row["payload"] for row in latest if row["status"] == "ok"]
             failed = [row for row in latest if row["status"] != "ok"]
+            shared_cost.update(
+                wall_seconds_until_report=time.perf_counter() - stage_started,
+                initially_completed_outputs=initially_completed,
+                imported_outputs=copied,
+                new_generated_outputs=completed_count - initially_completed - copied,
+            )
             report = write_report(
                 destination,
                 records,
@@ -837,7 +925,7 @@ class Study:
                 metadata={
                     "shared_stage_cost": shared_cost,
                     "identity": identity,
-                    "shared_stage_cost_scope": "current session only; new_generation_seconds sums returned decoder calls; reused rows retain their original measured timings",
+                    "shared_stage_cost_scope": "current session only; wall_seconds_until_report includes CPU preparation/scoring, retries, imports and incremental storage until report construction, but excludes global model/asset setup and final report publication; new_generation_seconds sums returned decoder calls; reused rows retain their original measured timings",
                     "complete": len(records) == expected and not failed,
                 },
                 bootstrap_repeats=self.config.bootstrap_replicates,

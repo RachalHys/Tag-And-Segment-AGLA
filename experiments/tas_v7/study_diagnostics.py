@@ -21,10 +21,15 @@ from .diagnostics import (
     InstanceEvidence,
     fixed_prefix_influence,
     inventory_audit,
-    remove_verified_instance,
+    remove_annotation_matched_instance,
     replace_same_instance_evidence,
 )
-from .evaluation import ChairLexicon
+from .evaluation import (
+    ChairLexicon,
+    _pairing_key,
+    aggregate_caption_metrics,
+    paired_cluster_bootstrap,
+)
 from .methods import method_by_id
 from .prepared import prepare_feature_batch, prepare_image
 
@@ -91,6 +96,108 @@ def matched_annotation_instances(
     return matches
 
 
+def paired_intervention_report(reference, interventions, *, repeats=1000, seed=0):
+    """Within-method supervised perturbation deltas, resampling whole images."""
+    if not reference or not interventions:
+        raise ValueError(
+            "Diagnostic comparison requires reference and intervention captions"
+        )
+
+    def groups(records):
+        grouped = defaultdict(list)
+        for record in records:
+            grouped[
+                (record["method"], record["protocol"], record["generation_mode"])
+            ].append(record)
+        return grouped
+
+    baseline = groups(reference)
+    comparisons = []
+    for variant, records in interventions.items():
+        changed = groups(records)
+        if changed.keys() != baseline.keys():
+            raise ValueError(
+                "Diagnostic intervention methods/protocols/modes differ from D-PRED"
+            )
+        for group, original in baseline.items():
+            candidate = changed[group]
+            first = {_pairing_key(record) for record in original}
+            second = {_pairing_key(record) for record in candidate}
+            if (
+                len(first) != len(original)
+                or len(second) != len(candidate)
+                or first != second
+            ):
+                raise ValueError(
+                    "Diagnostic comparison requires unique, aligned image/query/seed pairs"
+                )
+            indexed = {_pairing_key(record): record for record in original}
+            for record in candidate:
+                expected = indexed[_pairing_key(record)]
+                for field in ("query", "prompt", "annotated_categories", "instance_gt_categories", "chair_gt_categories", "evaluator_version"):
+                    if expected.get(field) != record.get(field):
+                        raise ValueError(f"Diagnostic paired caption/scoring identity differs: {field}")
+            paired = []
+            for metric in (
+                "CHAIRi",
+                "CHAIRs",
+                "category_coverage",
+                "true_mentions",
+                "false_mentions",
+                "length_words",
+            ):
+                try:
+                    result = paired_cluster_bootstrap(
+                        original, candidate, metric=metric, repeats=repeats, seed=seed
+                    )
+                except ValueError as exc:
+                    # Empty annotation/mention denominators are undefined,
+                    # never perfect scores or a reason to exclude an image.
+                    if "denominator" not in str(exc):
+                        raise
+                    result = {
+                        "metric": metric,
+                        "status": "undefined",
+                        "reason": str(exc),
+                    }
+                paired.append(result)
+            comparisons.append(
+                {
+                    "intervention": variant,
+                    "method": group[0],
+                    "protocol": group[1],
+                    "generation_mode": group[2],
+                    "applied_image_ids": sorted(
+                        {
+                            record["image_id"]
+                            for record in candidate
+                            if record["perception_metadata"]["intervention_details"][
+                                "applied"
+                            ]
+                        }
+                    ),
+                    "mask_changed_image_ids": sorted(
+                        {
+                            record["image_id"]
+                            for record in candidate
+                            if record["perception_metadata"]["union_mask_changed"]
+                        }
+                    ),
+                    "reference_metrics": aggregate_caption_metrics(original),
+                    "intervention_metrics": aggregate_caption_metrics(candidate),
+                    "paired": paired,
+                }
+            )
+    return {
+        "schema": "tas-perception-paired-v1",
+        "reference": "D-PRED",
+        "delta_direction": "intervention minus D-PRED within the same method/protocol/mode",
+        "pairing": "image/query/seed; all records retained, including no-match interventions",
+        "scope": "COCO annotation-supported, provisionally matched supervised perturbations; no causal attribution, automatic winner or guaranteed oracle bound",
+        "comparisons": comparisons,
+    }
+
+
 def run_diagnostics(study, finalist=None):
     rows = study.rows("audit")
     directory = study.persistent_run / "diagnostics"
@@ -130,7 +237,6 @@ def run_diagnostics(study, finalist=None):
             "mask_fraction": float(prediction.mask.mean()),
             "fallback": prediction.metadata["legacy_fallback"],
         }
-        audits.append(audit)
         with Image.open(study.work["data_root"] / row["image"]) as handle:
             image = handle.convert("RGB")
         labels = prediction.metadata.get("proposed_labels", [])
@@ -153,20 +259,32 @@ def run_diagnostics(study, finalist=None):
         for match in matches:
             annotation = lookup[match["annotation_id"]]
             x, y, w, h = annotation["bbox"]
+            annotated_mask = _mask(annotation, image.height, image.width)
+            predicted_mask = prediction.instances[match["prediction_index"]]
+            intersection = int(np.logical_and(predicted_mask, annotated_mask).sum())
+            union = int(np.logical_or(predicted_mask, annotated_mask).sum())
+            match.update(
+                mask_iou=intersection / union if union else None,
+                predicted_mask_area_pixels=int(predicted_mask.sum()),
+                annotation_mask_area_pixels=int(annotated_mask.sum()),
+                mask_intersection_pixels=intersection,
+                mask_union_pixels=union,
+            )
             annotation_evidence[str(annotation["id"])] = InstanceEvidence(
                 str(annotation["id"]),
                 categories[annotation["category_id"]],
                 (x, y, x + w, y + h),
-                _mask(annotation, image.height, image.width),
+                annotated_mask,
                 provenance="COCO annotation",
             )
+        audits.append(audit)
         for variant in overrides:
             key = {
                 "base_perception": original_key,
                 "diagnostic": variant,
                 "annotations_sha256": annotations_sha256,
                 "matches": matches,
-                "version": "same-instance-provisional-v2",
+                "version": "same-instance-provisional-v3",
             }
             value = study.cache.get(key)
             if value is not None:
@@ -179,9 +297,15 @@ def run_diagnostics(study, finalist=None):
                     **prediction.metadata,
                     "diagnostic": variant,
                     "matches": matches,
-                    "same_instance_count_preserved": variant != "D-MISS",
                     "annotation_scope": "matched predicted instances only; unmatched predictions retained",
                     "provisional_matching_requires_review": True,
+                    "intervention_details": {
+                        "intervention": variant,
+                        "applied": False,
+                        "status": "no_match",
+                        "instance_count_before": len(prediction.instances),
+                        "instance_count_after": len(prediction.instances),
+                    },
                 }
                 if variant == "D-MASK":
                     changed_evidence, details = replace_same_instance_evidence(
@@ -221,10 +345,10 @@ def run_diagnostics(study, finalist=None):
                     metadata["sam_rerun_on_modified_boxes"] = True
                 elif variant == "D-MISS" and matches:
                     removed = matches[0]
-                    changed_evidence, details = remove_verified_instance(
+                    changed_evidence, details = remove_annotation_matched_instance(
                         predicted_evidence,
                         str(removed["prediction_index"]),
-                        verified_present_ids=correspondence,
+                        annotation_id=str(removed["annotation_id"]),
                     )
                     instances = (
                         np.stack([item.mask for item in changed_evidence])
@@ -247,9 +371,7 @@ def run_diagnostics(study, finalist=None):
                             if i != removed["prediction_index"]
                         ]
                     metadata["removed_prediction_index"] = removed["prediction_index"]
-                    metadata["verified_present_annotation_id"] = removed[
-                        "annotation_id"
-                    ]
+                    metadata["matched_present_annotation_id"] = removed["annotation_id"]
                 mask = (
                     instances.any(axis=0)
                     if len(instances)
@@ -259,6 +381,9 @@ def run_diagnostics(study, finalist=None):
                     mask_fraction=float(mask.mean()),
                     mask_empty=not bool(mask.any()),
                     mask_full=bool(mask.all()),
+                    same_instance_count_preserved=len(instances)
+                    == len(prediction.instances),
+                    union_mask_changed=not np.array_equal(mask, prediction.mask),
                 )
                 changed = PerceptionResult(mask, instances, boxes, scores, metadata)
                 study.cache.put(key, changed.arrays(), changed.metadata)
@@ -275,16 +400,18 @@ def run_diagnostics(study, finalist=None):
     methods = [method_by_id("E0"), method_by_id("E1")]
     if finalist is not None:
         methods.append(finalist)
-    original_records, _ = study.collection(
+    original_records, original_report = study.collection(
         "diagnostics-D-PRED", rows, methods, seeds=(study.config.seeds[0],)
     )
+    intervention_records = {}
     for variant, values in overrides.items():
-        study.collection(
+        intervention_records[variant], _ = study.collection(
             "diagnostics-" + variant,
             rows,
             methods,
             seeds=(study.config.seeds[0],),
             prepared_overrides=values,
+            reuse_from=(original_records, original_report),
         )
     probe_inputs = canonical_hash(
         {
@@ -294,6 +421,8 @@ def run_diagnostics(study, finalist=None):
             "methods": [method.to_dict() for method in methods],
             "rows": rows,
             "annotation_sha256": annotations_sha256,
+            "bootstrap_replicates": study.config.bootstrap_replicates,
+            "bootstrap_seed": study.config.bootstrap_seed,
             "images": {
                 row["image"]: sha256_file(study.work["data_root"] / row["image"])
                 for row in rows
@@ -302,14 +431,30 @@ def run_diagnostics(study, finalist=None):
     )
     completion_path = directory / "diagnostics.json"
     influence_path = directory / "fixed-prefix-influence.jsonl"
-    if completion_path.exists() and influence_path.exists():
+    comparison_path = directory / "paired-interventions.json"
+    if (
+        completion_path.exists()
+        and influence_path.exists()
+        and comparison_path.exists()
+    ):
         completed = json.loads(completion_path.read_text())
-        if completed.get("probe_inputs") == probe_inputs and completed.get(
-            "influence_sha256"
-        ) == sha256_file(influence_path):
+        if (
+            completed.get("probe_inputs") == probe_inputs
+            and completed.get("influence_sha256") == sha256_file(influence_path)
+            and completed.get("comparison_sha256") == sha256_file(comparison_path)
+        ):
             study.stage_reports["diagnostics"] = str(completion_path)
             study.cache.flush()
             return
+    atomic_json(
+        comparison_path,
+        paired_intervention_report(
+            original_records,
+            intervention_records,
+            repeats=study.config.bootstrap_replicates,
+            seed=study.config.bootstrap_seed,
+        ),
+    )
     # Use one original-generated prefix per image for ALL views. No cached E1
     # logits are treated as a caption generated by another policy.
     influence = []
@@ -365,8 +510,10 @@ def run_diagnostics(study, finalist=None):
             "annotation_source_sha256": annotations_sha256,
             "perception_audit": "perception-audit.jsonl",
             "influence": "fixed-prefix-influence.jsonl",
+            "paired_interventions": comparison_path.name,
             "probe_inputs": probe_inputs,
             "influence_sha256": sha256_file(influence_path),
+            "comparison_sha256": sha256_file(comparison_path),
             "automatically_run": ["D-PRED", *overrides],
             "not_automatically_run": {
                 "D-INV": "optional downstream rerun; explicit supervised diagnostic",

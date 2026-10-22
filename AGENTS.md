@@ -40,6 +40,11 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   Reuse screen samples in controls only with identical ordered inputs, methods,
   seeds and execution settings. Retain source provenance and measured costs;
   report reused outputs separately from new generation.
+  Diagnostic reuse also requires matching every visual tensor for the whole
+  batch, including unchanged companions/padding; retain destination metadata.
+- Keep provisional annotation correspondences distinct from independent
+  verification. Report no-match interventions honestly; paired perception
+  deltas/mask IoU are supervised diagnostics, not causal bounds or a gate.
 - Freeze the shortlist coverage rule before outputs: the approved default is
   at most two absolute percentage points of loss versus E1-H; never force a finalist.
 - Keep models, datasets, caches, results and delivery bundles out of Git.

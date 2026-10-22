@@ -148,6 +148,17 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
         "image_id": 1, "method": "F4", "reference_caption": "Original caption",
         "candidate_caption": "Batched caption",
     }) + "\n")
+    diagnostics = tmp_path / "runs/aa/diagnostics"
+    diagnostics.mkdir()
+    (diagnostics / "paired-interventions.json").write_text(json.dumps({
+        "scope": "provisional; no causal attribution", "comparisons": [{
+            "intervention": "D-MASK", "method": "E1", "applied_image_ids": [1],
+            "mask_changed_image_ids": [1], "paired": [
+                {"metric": "CHAIRi", "delta_candidate_minus_baseline": -0.01, "ci_low": -0.02, "ci_high": 0.0},
+                {"metric": "category_coverage", "status": "undefined"},
+            ],
+        }],
+    }))
     notebook = build("d" * 40, source_package=fixture_package("d" * 40))
     cell = next(cell["source"] for cell in notebook["cells"] if "runs_root =" in cell["source"])
     output = []
@@ -159,6 +170,8 @@ def test_report_renders_old_audits_and_includes_newest_run(tmp_path, monkeypatch
     assert headings == ["### Run `aa`", "### Run `dd`", "### Run `ee`"]
     assert any("Paired execution comparison" in str(value) for value in output)
     assert any("Batched caption" in str(value) for value in output)
+    assert any("Paired perception interventions" in str(value) for value in output)
+    assert any("-1.00 [-2.00, +0.00]" in str(value) for value in output)
 
 
 @pytest.fixture

@@ -121,3 +121,27 @@ def prepare_feature_batch(runtime, prepared, methods):
 
 def method_features(feature_batch, method):
     return {view: feature_batch[pixel_key(method, view)] for view in method.views}
+
+
+def input_fingerprints(prepared, method):
+    """CPU pixel identities for exact reuse of completed diagnostic captions.
+
+    Checking every named view is conservative: even differences that disappear
+    on conversion to FP16 cause regeneration. No prefix or KV cache is shared.
+    """
+    # Scope this cache to one call. Research callers may edit/reassign pixels
+    # between experiments while retaining the same prepared dictionary.
+    cached = {}
+    result = {}
+    for view in method.views:
+        name = pixel_key(method, view)
+        if name not in cached:
+            pixel = prepared["pixels"][name]
+            if pixel.device.type != "cpu":
+                raise ValueError("Diagnostic input fingerprints require CPU preprocessing tensors.")
+            cached[name] = {
+                "shape": list(pixel.shape), "stride": list(pixel.stride()), "dtype": str(pixel.dtype),
+                "sha256": hashlib.sha256(pixel.numpy().tobytes()).hexdigest(),
+            }
+        result[view] = cached[name]
+    return result
