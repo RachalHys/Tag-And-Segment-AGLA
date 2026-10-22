@@ -102,6 +102,9 @@ image; older records without latency measurements report it as unavailable.
 Diagnostics use provisional annotation matches; they do not establish causal
 explanations or guaranteed oracle bounds.
 Caption quality and ambiguous object mentions still need scientific review.
+Automatic P0-D runs D-PRED, D-MASK, D-BOX and D-MISS. D-FALSE and phrase-utility
+checks require independently verified examples and remain manual research steps;
+the notebook does not infer verified absence from missing COCO annotations.
 
 ## Code and persistence
 

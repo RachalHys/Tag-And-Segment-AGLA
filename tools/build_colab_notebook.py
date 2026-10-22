@@ -165,6 +165,11 @@ def build(
     comparison and runs baseline perception diagnostics, then stops dependent
     stages without forcing a finalist.
 
+    Automatic P0-D covers D-PRED, D-MASK, D-BOX and D-MISS. D-FALSE and
+    correctness-based phrase probes require independently verified examples
+    and remain manual research steps. Caption quality and ambiguous mentions
+    also require scientific review.
+
     Full A100 weights have not been tested by the local CPU suite. P0 rejects
     baseline mismatches before bulk generation. No scientific gains are assumed.
     """)
