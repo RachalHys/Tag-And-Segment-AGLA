@@ -194,13 +194,13 @@ def build(
         raise RuntimeError("Select a GPU runtime, or use PHASE=prepare/score on CPU.")
     if effective_phase == "run" and not (persistent / "preparation.json").is_file():
         raise RuntimeError("Run this notebook once in a CPU runtime first. That downloads/persists models and data before A100 allocation.")
-    from tas_runtime.bootstrap import ensure_environment
+    from tas_runtime.bootstrap import ensure_environment, subprocess_environment
     python = ensure_environment(mode, "/content/tas-v7-envs", checkout,
                                 diagnostics_dir=persistent / "diagnostics/environment")
     if DATASET == "amber":
         from tas_runtime.bootstrap import ensure_amber
         ensure_amber(python, "/content/tas-v7-envs", checkout)
-    env = dict(os.environ, PYTHONHASHSEED="0", TOKENIZERS_PARALLELISM="false", MPLBACKEND="Agg",
+    env = dict(subprocess_environment(), PYTHONHASHSEED="0", TOKENIZERS_PARALLELISM="false",
                NLTK_DATA=str(persistent / "nlp"), YOLO_CONFIG_DIR=str(pathlib.Path(LOCAL_ROOT) / "ultralytics"))
     configuration = {
         "persistent_root":PERSISTENT_ROOT, "local_root":LOCAL_ROOT, "stage":STAGE,

@@ -29,8 +29,14 @@ REQUIRED = {
 }
 
 
+def subprocess_environment():
+    """Keep Colab's inline plotting backend out of standalone research workers."""
+    return dict(os.environ, MPLBACKEND="Agg")
+
+
 def _run(command, **kwargs):
     print("+ " + " ".join(map(str, command)), flush=True)
+    kwargs.setdefault("env", subprocess_environment())
     return subprocess.run(list(map(str, command)), check=True, **kwargs)
 
 
@@ -93,19 +99,20 @@ import importlib, importlib.metadata, json, os, sys
 def step(message):
  print('[preflight] '+message, flush=True)
 step('interpreter: '+sys.executable+' | '+sys.version)
-print(json.dumps({'python_paths':sys.path,'environment':{key:os.environ.get(key) for key in ('PYTHONPATH','PYTHONHOME','LD_LIBRARY_PATH','CUDA_VISIBLE_DEVICES')}}),flush=True)
+print(json.dumps({'python_paths':sys.path,'environment':{key:os.environ.get(key) for key in ('PYTHONPATH','PYTHONHOME','LD_LIBRARY_PATH','CUDA_VISIBLE_DEVICES','MPLBACKEND')}}),flush=True)
 assert sys.version_info[:2]==(3,10), sys.version
 expected=json.loads(sys.argv[1])
 step('declared package versions')
 actual={key:importlib.metadata.version(key) for key in expected}
 assert actual==expected, (actual,expected)
-for name in ('torch','torchvision','numpy','transformers','PIL','nltk','textblob','cv2','pycocotools'):
+for name in ('torch','torchvision','numpy','transformers','PIL','nltk','textblob','cv2','pycocotools','matplotlib.pyplot'):
  step('import '+name)
  module=importlib.import_module(name)
  print(name+': '+str(getattr(module,'__version__',''))+' | '+str(getattr(module,'__file__','')),flush=True)
-import torch, torchvision
+import torch, torchvision, matplotlib
 assert torch.__version__.split('+')[0]=='2.4.1', torch.__version__
 assert torchvision.__version__.split('+')[0]=='0.19.1', torchvision.__version__
+assert matplotlib.get_backend().lower()=='agg', matplotlib.get_backend()
 if sys.argv[2]=='gpu':
  step('CUDA availability and runtime version')
  assert torch.cuda.is_available(), 'GPU environment installed, but CUDA is unavailable.'
@@ -126,7 +133,7 @@ if sys.argv[3]=='yes':
  import ultralytics
  assert ultralytics.__version__=='8.3.40', ultralytics.__version__
 step('passed')
-print(json.dumps({'python':sys.version,'torch':torch.__version__,'cuda':torch.version.cuda,'packages':actual}))
+print(json.dumps({'python':sys.version,'torch':torch.__version__,'cuda':torch.version.cuda,'packages':actual,'matplotlib_backend':matplotlib.get_backend()}))
 """
     print(f"Checking {mode} environment: {python}", flush=True)
     result = subprocess.run(
@@ -142,6 +149,7 @@ print(json.dumps({'python':sys.version,'torch':torch.__version__,'cuda':torch.ve
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=subprocess_environment(),
     )
     output = result.stdout or ""
     if log_path is not None:

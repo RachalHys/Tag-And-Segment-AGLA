@@ -68,7 +68,10 @@ Caption quality and ambiguous object mentions still need scientific review.
 An isolated Python 3.10.16 subprocess uses Torch 2.4.1 / torchvision 0.19.1 and
 Transformers 4.35.2. Colab's kernel is left intact. Profiles are in `requirements/`;
 CLIP builds with pinned setuptools and no build isolation. No external
-FlashAttention compilation is needed. See the official
+FlashAttention compilation is needed. Bootstrap checks and research workers use
+Matplotlib's file-only `Agg` backend so they do not inherit Colab's kernel-only
+inline backend; CPU preflight checks this before checkpoint downloads. See the
+official
 [PyTorch matrix](https://pytorch.org/get-started/previous-versions/),
 [uv Python guide](https://docs.astral.sh/uv/concepts/python-versions/) and
 [Colab storage/runtime guidance](https://research.google.com/colaboratory/faq.html).

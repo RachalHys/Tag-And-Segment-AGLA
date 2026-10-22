@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -52,17 +53,22 @@ def test_failed_child_error_is_visible_and_persisted(tmp_path, monkeypatch, caps
     assert output in capsys.readouterr().out
 
 
-def test_cpu_preflight_labels_imports_and_records_interpreter(tmp_path):
+def test_cpu_preflight_handles_inherited_colab_backend(tmp_path, monkeypatch):
     if sys.version_info[:2] != (3, 10):
         pytest.skip("The declared Colab interpreter is Python3.10.")
+    inline_backend = "module://matplotlib_inline.backend_inline"
+    monkeypatch.setenv("MPLBACKEND", inline_backend)
     log = tmp_path / "preflight.log"
     report = validate_environment(sys.executable, "cpu", log_path=log)
     output = log.read_text()
     assert sys.executable in output
     assert "[preflight] import torch" in output
     assert "[preflight] import torchvision" in output
+    assert "[preflight] import matplotlib.pyplot" in output
     assert "[preflight] passed" in output
     assert report["packages"]["numpy"] == "1.26.4"
+    assert report["matplotlib_backend"].lower() == "agg"
+    assert os.environ["MPLBACKEND"] == inline_backend
 
 
 def test_prepared_nlp_is_reused_offline_and_detects_resource_drift(
