@@ -10,6 +10,8 @@ investigation. It runs P0, profiles one warmed 24-token F4 call, displays the
 execution table and stops before smoke. Use `STAGE="flow"` for the full study.
 The profile is diagnostic, adds overhead and never supplies policy-selection
 timings. CUDA-profiler unavailability is reported without changing P0.
+Generation errors during profiling still stop the run. Completed P0 evidence
+is saved first, and each profile clears older operator tables.
 
 ## Run in Colab
 

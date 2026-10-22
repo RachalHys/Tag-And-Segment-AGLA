@@ -32,6 +32,34 @@ def test_unavailable_profiler_is_reported_without_claiming_measurement(tmp_path,
     }
 
 
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, torch.cuda.OutOfMemoryError, FloatingPointError]
+)
+def test_profile_propagates_generation_failure(tmp_path, error_type):
+    def failed_generation():
+        raise error_type("generation failed")
+
+    with pytest.raises(error_type, match="generation failed"):
+        profile_call(failed_generation, tmp_path, device="cpu")
+    assert json.loads((tmp_path / "profile.json").read_text()) == {
+        "status": "failed", "error": "generation failed",
+    }
+    assert not (tmp_path / "operators.txt").exists()
+
+
+def test_unavailable_profile_removes_old_operator_table(tmp_path, monkeypatch):
+    table = tmp_path / "operators.txt"
+    table.write_text("stale measurements from a previous session")
+
+    def unavailable(**kwargs):
+        raise RuntimeError("CUPTI unavailable")
+
+    monkeypatch.setattr(torch.profiler, "profile", unavailable)
+    result = profile_call(lambda: None, tmp_path, device="cpu")
+    assert result["status"] == "unavailable"
+    assert not table.exists()
+
+
 def test_stage_names_and_bar_are_visible_on_redirected_stdout(capsys):
     with step("Test stage"):
         with progress(total=2, desc="Test images", unit="image") as bar:

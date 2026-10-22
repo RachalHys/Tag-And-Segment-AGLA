@@ -22,20 +22,30 @@ def profile_call(call, directory, *, device):
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    table_path = directory / "operators.txt"
+    result_path = directory / "profile.json"
+    table_path.unlink(missing_ok=True)
+    result_path.unlink(missing_ok=True)
     activities = [torch.profiler.ProfilerActivity.CPU]
     cuda = str(device).startswith("cuda")
     if cuda:
         activities.append(torch.profiler.ProfilerActivity.CUDA)
+    call_failed = False
     try:
         with torch.profiler.profile(activities=activities) as profiler:
-            call()
+            try:
+                call()
+            except Exception as exc:
+                call_failed = True
+                atomic_json(result_path, {"status": "failed", "error": str(exc)})
+                raise
         averages = profiler.key_averages()
         cpu_table = averages.table(sort_by="self_cpu_time_total", row_limit=20)
         cuda_table = (
             averages.table(sort_by="self_cuda_time_total", row_limit=20)
             if cuda else "CUDA profiling was not requested."
         )
-        (directory / "operators.txt").write_text(
+        table_path.write_text(
             "Profiler adds overhead; use unprofiled pilot for throughput.\n\n"
             + cpu_table + "\n\n" + cuda_table
         )
@@ -48,11 +58,13 @@ def profile_call(call, directory, *, device):
         if cuda:
             print(cuda_table, flush=True)
     except RuntimeError as exc:
+        if call_failed:
+            raise
         # CUPTI can be unavailable in a hosted runtime. This diagnostic never
         # bypasses or changes the independently completed P0 correctness gate.
         result = {"status": "unavailable", "error": str(exc)}
         print(f"Operator profiler unavailable: {exc}", flush=True)
-    atomic_json(directory / "profile.json", result)
+    atomic_json(result_path, result)
     return result
 
 

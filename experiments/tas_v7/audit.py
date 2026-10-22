@@ -544,6 +544,8 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     if config.stage == "audit":
         from tas_runtime.profiling import profile_call
 
+        # Keep the completed P0 evidence even if the optional profiled call fails.
+        atomic_json(root / "audit.json", report)
         method = method_by_id("F4")
         count = best["batch_images"]
         with step("Profile one warmed F4 pilot (diagnostic only)"):

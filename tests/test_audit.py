@@ -328,3 +328,26 @@ def test_audit_only_profile_never_runs_in_flow(pilot_case, tmp_path, monkeypatch
     )
     assert len(calls) == 1
     assert report["operator_profile"]["status"] == "fixture"
+
+
+def test_profile_generation_failure_keeps_completed_p0_evidence(
+    pilot_case, tmp_path, monkeypatch
+):
+    from tas_runtime import profiling
+
+    runtime, config, rows, prepared = pilot_case
+
+    def failed_profile(call, directory, *, device):
+        raise RuntimeError("profiled generation failed")
+
+    monkeypatch.setattr(profiling, "profile_call", failed_profile)
+    directory = tmp_path / "audit"
+    with pytest.raises(RuntimeError, match="profiled generation failed"):
+        audit_and_pilot(
+            runtime, replace(config, stage="audit"), rows, prepared, directory
+        )
+    report = json.loads((directory / "audit.json").read_text())
+    assert report["status"] == "passed"  # P0 evidence, not a completed study
+    assert all(check["native_token_match"] for check in report["baseline_checks"])
+    assert json.loads((directory / "execution-policy.json").read_text()) == report["selected_policy"]
+    assert "operator_profile" not in report

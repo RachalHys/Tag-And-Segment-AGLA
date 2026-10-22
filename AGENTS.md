@@ -27,6 +27,7 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   scored results or change a real image's RNG stream.
 - Use `--stage audit` when building the short performance-check notebook. Its
   optional operator profile runs only after P0 and never supplies selection timings.
+  Profiler unavailability must not suppress generation errors or display stale tables.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
 - Freeze the shortlist coverage rule before outputs: the approved default is
