@@ -11,10 +11,14 @@ Only the notebook needs to be uploaded to Colab.
 2. Press **Run all** and authorize Drive. Preflight runs before the large
    downloads. Models, selected data and NLP resources are saved to
    `MyDrive/TAS-Shared`.
-3. Select **A100 80 GB**, then **Run all** again. The notebook installs the GPU
+3. Select **A100 40 or 80 GB**, then **Run all** again. The notebook installs the GPU
    environment, restores files locally, loads one LLaVA runtime and runs P0.
 4. Run again after a session ends. Completed results and perception caches are
    reused. Keep the same persistent root in future idea notebooks.
+
+Defaults use `REQUIRE_A100_80GB=False` and `BATCH_SIZES=[1, 2]` for the observed
+A100 40 GB runtime. Larger batch candidates can be tested separately on 80 GB;
+the blocking P0 audit still selects and freezes the execution policy.
 
 Allow at least **25 GB free Drive space** for the roughly 17–18 GB checkpoints
 plus data and results. Larger runs need more. The default study budget is three

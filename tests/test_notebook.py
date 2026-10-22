@@ -81,6 +81,8 @@ def test_generated_settings_are_plain_python_without_colab_import():
     assert namespace["SEEDS"] == [0, 1, 2]
     assert namespace["RUN_FINAL_REMAINDER"] is False
     assert namespace["AUTO_SHUTDOWN"] is True
+    assert namespace["REQUIRE_A100_80GB"] is False
+    assert namespace["BATCH_SIZES"] == [1, 2]
     assert namespace["COVERAGE_TOLERANCE_PP"] == 2.0
 
 

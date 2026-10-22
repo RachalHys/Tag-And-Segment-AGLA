@@ -58,6 +58,9 @@ def test_cpu_preflight_handles_inherited_colab_backend(tmp_path, monkeypatch):
         pytest.skip("The declared Colab interpreter is Python3.10.")
     inline_backend = "module://matplotlib_inline.backend_inline"
     monkeypatch.setenv("MPLBACKEND", inline_backend)
+    monkeypatch.setenv("PYTHONPATH", "/env/python")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/lib64-nvidia")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     log = tmp_path / "preflight.log"
     report = validate_environment(sys.executable, "cpu", log_path=log)
     output = log.read_text()
@@ -69,6 +72,12 @@ def test_cpu_preflight_handles_inherited_colab_backend(tmp_path, monkeypatch):
     assert report["packages"]["numpy"] == "1.26.4"
     assert report["matplotlib_backend"].lower() == "agg"
     assert os.environ["MPLBACKEND"] == inline_backend
+    import json
+
+    child_env = json.loads(output.splitlines()[1])["environment"]
+    assert child_env["PYTHONPATH"] == "/env/python"
+    assert child_env["LD_LIBRARY_PATH"] == "/usr/lib64-nvidia"
+    assert child_env["CUDA_VISIBLE_DEVICES"] == "0"
 
 
 def test_prepared_nlp_is_reused_offline_and_detects_resource_drift(

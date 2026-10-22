@@ -71,7 +71,7 @@ def build(
     # TAS v7 — CPU preparation / A100 experiments
 
     Upload this notebook to Colab. Use **CPU → Run all** first, then select your
-    **A100 80 GB → Run all**. `PHASE="auto"` selects preparation on CPU and the
+    **A100 40 or 80 GB → Run all**. `PHASE="auto"` selects preparation on CPU and the
     study on GPU. Models/data/caches/results live in the same persistent Drive
     folder across sessions and future notebooks. CPU/GPU environments are
     recreated locally; the notebook kernel is left intact.
@@ -105,7 +105,7 @@ def build(
     STAGE = "flow"             # flow / audit / smoke / screen / confirm / controls / diagnostics / final / external
     MAX_SESSION_MINUTES = 180  # planned stop; run again to resume without changing the experiment
     SEEDS = [0, 1, 2]
-    REQUIRE_A100_80GB = True
+    REQUIRE_A100_80GB = False   # supports your A100 40 GB; True enforces at least 80 GB
     AUTO_SHUTDOWN = True       # flush Drive, then release runtime after this session's work
     RUN_CONFIRMATION = True
     RUN_CONTROLS = True
@@ -116,7 +116,7 @@ def build(
     EXTERNAL_MANIFEST = None
     EXTERNAL_IMAGE_ROOT = None
     METHODS = []               # empty = exact initial 14; external runs should select frozen finalists explicitly
-    BATCH_SIZES = [1, 2, 4, 8]  # measured once, correctness checked, then policy locked
+    BATCH_SIZES = [1, 2]        # conservative 40 GB candidates; measured, checked, then locked
     ATTENTION_BACKENDS = ["eager", "sdpa"]
     LAST_POSITION_LOGITS = True
     SPLIT_SEED = 20261021
