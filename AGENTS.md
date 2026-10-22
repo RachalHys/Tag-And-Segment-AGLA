@@ -18,6 +18,9 @@ the Colab notebook imports a fixed implementation commit. Keep the original
   restores them over the pinned public baseline; no separate upload is needed.
 - Keep the P0 baseline, geometry, support and execution checks blocking. CPU
   fixtures do not establish full-checkpoint parity or A100 performance.
+  Encode cached visual tensors individually to preserve the native FP16 vision
+  batch shape. Freeze the vocabulary-head choice with the execution policy;
+  the eager/serial/full-head option must pass the same P0 checks.
 - Preserve frozen dataset/run identities. Use a new identity for changed
   methods, inputs or execution semantics; never rewrite successful outputs.
 - Freeze the shortlist coverage rule before outputs: the approved default is

@@ -155,3 +155,36 @@ def test_random_legacy_empty_mask_is_black_without_native_fallback(image_case):
         method_features(features, legacy)["OBJ-H"],
         method_features(features, random)["OBJ-H"],
     )
+
+
+def test_feature_reuse_preserves_single_image_encoder_shape_and_deduplicates():
+    class ShapeSensitiveRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def features(self, images):
+            self.calls.append(images.clone())
+            # Model the documented batch-shape dependence of reduced-precision
+            # kernels. Adding another method must not change an existing view.
+            return images.flatten(2).transpose(1, 2) + (len(images) - 1)
+
+    original = torch.zeros(3, 4, 4)
+    object_view = torch.ones_like(original)
+    context = torch.full_like(original, 2)
+    prepared = [
+        {"pixels": {"ORIG": original, "OBJ-H": object_view, "FG-U": context}},
+        # Duplicate pixels retain the same visual features across image rows.
+        {"pixels": {"ORIG": original.clone(), "OBJ-H": object_view, "FG-U": context}},
+    ]
+    runtime = ShapeSensitiveRuntime()
+    single_method = prepare_feature_batch(runtime, prepared, [method_by_id("E0")])
+    runtime.calls.clear()
+    all_methods = prepare_feature_batch(
+        runtime, prepared, [method_by_id("E0"), method_by_id("F4")]
+    )
+    assert torch.equal(single_method["ORIG"], all_methods["ORIG"])
+    assert len(runtime.calls) == 3  # three unique tensors, each encoded once
+    assert all(len(images) == 1 for images in runtime.calls)
+    for name, pixels in (("ORIG", original), ("OBJ-H", object_view), ("FG-U", context)):
+        expected = pixels.flatten(1).transpose(0, 1)
+        assert torch.equal(all_methods[name], expected.repeat(2, 1, 1))

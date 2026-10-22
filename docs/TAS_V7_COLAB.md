@@ -58,6 +58,15 @@ New probability math is FP32; weights remain FP16. P0 checks native baselines,
 geometry, filtered support and serial/batched behavior before selecting an
 execution policy. Rejected options are recorded; the chosen policy stays fixed.
 
+Cached visual tensors are encoded individually with the native image batch size
+of one, then reused across methods and batched language decoding. FP16 results
+can depend on computation shape, as described in
+[PyTorch's numerical accuracy notes](https://github.com/pytorch/pytorch/blob/v2.4.1/docs/source/notes/numerical_accuracy.rst).
+If every requested optimization is rejected, P0 also tests eager, serial,
+single-image decoding with the full vocabulary head. This option must pass the
+same checks; tolerances and token/support requirements are unchanged. The head
+choice is saved in the locked execution policy and restored on reconnect.
+
 Reports retain failures, CHAIR, category coverage, length, timing scopes and
 paired image-bootstrap intervals and a descriptive exact-word-count paired
 comparison. Actual batch-return latency is separate from amortized seconds per

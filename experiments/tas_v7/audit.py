@@ -81,11 +81,16 @@ def compare_snapshots(
         raise AssertionError("Forced-prefix snapshot counts differ.")
     worst = 0.0
     argmax_changes, support_changes = 0, 0
-    for expected, actual in zip(reference, candidate):
+    for step, (expected, actual) in enumerate(zip(reference, candidate)):
         for name in expected:
             first, second = expected[name].float(), actual[name].float()
             worst = max(worst, float((first - second).abs().max()))
-            torch.testing.assert_close(first, second, atol=atol, rtol=rtol)
+            try:
+                torch.testing.assert_close(first, second, atol=atol, rtol=rtol)
+            except AssertionError as exc:
+                raise AssertionError(
+                    f"Forced-prefix step {step}, view {name}: {exc}"
+                ) from exc
             argmax_changes += int((first.argmax(-1) != second.argmax(-1)).sum())
             if name == "ORIG" and support:
                 support_changes += int(
@@ -140,6 +145,7 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     ids = ids.unsqueeze(0).to(runtime.device)
     runtime.set_attention("eager")
     original_last = runtime.backend.last_position_logits
+    head_native_match = True
     # The original E1 implementation defines sampling only. Audit that native
     # path even when a study asks for greedy decoding; do not call an unrelated
     # HF greedy_search path that would ignore E1's augmented image.
@@ -232,8 +238,10 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                     optimized_match
                 )
                 if not optimized_match:
-                    raise AssertionError(
-                        "Last-position projection changed the baseline pilot. Set last_position_logits=False and rerun the audit."
+                    head_native_match = False
+                    print(
+                        f"Last-position projection rejected: {identifier} native sampled tokens changed.",
+                        flush=True,
                     )
     except Exception as exc:
         report.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -319,97 +327,96 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
         "methods": [method.id for method in pilot_methods],
         "input": "per-image raw pixels; eager attention; full-position vocabulary head",
         "candidate_input": "cached projected features; selected head, attention and batch policy",
+        "vision_encoding": "each exact tensor encoded once at native image batch size 1",
         "checks": "fixed-prefix logits/support, greedy tokens, native sampled tokens when study samples",
         "scope": "pilot only; no bitwise equivalence guarantee for unseen images or longer captions",
     }
     eligible = []
-    for backend_name in config.attention_backends:
+    policies = [
+        (
+            {
+                "backend": backend,
+                "execution": execution,
+                "batch_images": count,
+                "last_position_logits": original_last and head_native_match,
+            },
+            False,
+        )
+        for backend in config.attention_backends
         for execution in (
             ["serial", "packed"] if config.execution == "auto" else [config.execution]
-        ):
-            for requested in config.batch_sizes:
-                candidate_policy = {
-                    "backend": backend_name,
-                    "execution": execution,
-                    "batch_images": requested,
+        )
+        for count in config.batch_sizes
+        if count <= len(pilot_rows) and (execution != "serial" or count == 1)
+    ]
+    if locked_policy is not None:
+        # The head is part of the frozen execution policy, including reconnects.
+        policies = [(locked_policy, False)]
+    else:
+        reference_policy = {
+            "backend": "eager",
+            "execution": "serial",
+            "batch_images": 1,
+            "last_position_logits": False,
+        }
+        if not any(policy == reference_policy for policy, _ in policies):
+            policies.append((reference_policy, True))
+    for candidate_policy, fallback in policies:
+        if fallback and eligible:
+            break
+        backend_name = candidate_policy["backend"]
+        execution = candidate_policy["execution"]
+        requested = candidate_policy["batch_images"]
+        item = {**candidate_policy, "views": 3, "method_checks": {}}
+        if fallback:
+            item["reference_fallback"] = True
+        try:
+            if candidate_policy["last_position_logits"] and not head_native_match:
+                raise AssertionError(
+                    "The locked last-position head no longer reproduces native sampled tokens."
+                )
+            runtime.set_attention(backend_name)
+            runtime.backend.last_position_logits = candidate_policy["last_position_logits"]
+            count = requested
+            for method in pilot_methods:
+                reference = references[method.id]
+                local_views = {
+                    name: value[:count]
+                    for name, value in method_features(features, method).items()
                 }
-                if locked_policy is not None and candidate_policy != locked_policy:
-                    continue
-                if (
-                    requested > len(pilot_rows)
-                    or execution == "serial"
-                    and requested != 1
-                ):
-                    continue
-                item = {
-                    "backend": backend_name,
-                    "execution": execution,
-                    "batch_images": requested,
-                    "views": 3,
-                    "method_checks": {},
-                }
-                try:
-                    runtime.set_attention(backend_name)
-                    count = requested
-                    for method in pilot_methods:
-                        reference = references[method.id]
-                        local_views = {
-                            name: value[:count]
-                            for name, value in method_features(features, method).items()
-                        }
-                        actual = forced_prefix_logits(
-                            runtime.backend,
-                            all_ids[:count],
-                            local_views,
-                            forced,
-                            execution=execution,
+                actual = forced_prefix_logits(
+                    runtime.backend,
+                    all_ids[:count],
+                    local_views,
+                    forced,
+                    execution=execution,
+                )
+                expected = [
+                    {
+                        name: torch.cat(
+                            [
+                                reference["logits"][i][step][name]
+                                for i in range(count)
+                            ]
                         )
-                        expected = [
-                            {
-                                name: torch.cat(
-                                    [
-                                        reference["logits"][i][step][name]
-                                        for i in range(count)
-                                    ]
-                                )
-                                for name in method.views
-                            }
-                            for step in range(len(forced) + 1)
-                        ]
-                        checks = {"protocol": method.protocol}
-                        item["method_checks"][method.id] = checks
-                        checks.update(
-                            compare_snapshots(
-                                expected,
-                                actual,
-                                protocol=method.protocol,
-                                beta=method.beta,
-                                support=method.support,
-                            )
-                        )
-                        for mode in ("greedy", "sample"):
-                            if not reference[mode]:
-                                continue
-                            result = generate(
-                                runtime,
-                                config,
-                                method,
-                                all_ids[:count],
-                                local_views,
-                                reference["seeds"][:count],
-                                greedy=mode == "greedy",
-                                execution=execution,
-                                max_new_tokens=config.pilot_tokens,
-                            )
-                            checks[mode + "_match"] = (
-                                result.token_ids == reference[mode][:count]
-                            )
-                            if not checks[mode + "_match"]:
-                                raise AssertionError(
-                                    f"{method.id} {mode} pilot captions changed; candidate not selected automatically."
-                                )
-                    # Warm one more run, with comparable maximum token budget.
-                    # The final method in pilot_methods is the V=3 F4 topology.
+                        for name in method.views
+                    }
+                    for step in range(len(forced) + 1)
+                ]
+                checks = {"protocol": method.protocol}
+                item["method_checks"][method.id] = checks
+                checks.update(
+                    compare_snapshots(
+                        expected,
+                        actual,
+                        protocol=method.protocol,
+                        beta=method.beta,
+                        support=method.support,
+                    )
+                )
+                for mode in ("greedy", "sample"):
+                    if not reference[mode]:
+                        continue
                     result = generate(
                         runtime,
                         config,
@@ -417,35 +424,59 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
                         all_ids[:count],
                         local_views,
                         reference["seeds"][:count],
-                        greedy=True,
+                        greedy=mode == "greedy",
                         execution=execution,
                         max_new_tokens=config.pilot_tokens,
                     )
-                    seconds = result.prefill_seconds + result.decode_seconds
-                    item.update(
-                        status="passed",
-                        seconds=seconds,
-                        outputs_per_hour=3600 * count / seconds,
-                        token_count=sum(map(len, result.token_ids)),
-                        peak_memory_bytes=result.peak_memory_bytes,
+                    checks[mode + "_match"] = (
+                        result.token_ids == reference[mode][:count]
                     )
-                    eligible.append(item)
-                except (RuntimeError, AssertionError, FloatingPointError) as exc:
-                    item.update(status="rejected", error=f"{type(exc).__name__}: {exc}")
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                report["pilot"].append(item)
-                print(
-                    f"Pilot {backend_name}/{execution}/B={requested}: {item['status']}",
-                    flush=True,
-                )
+                    if not checks[mode + "_match"]:
+                        raise AssertionError(
+                            f"{method.id} {mode} pilot captions changed; candidate not selected automatically."
+                        )
+            # Warm one more run, with comparable maximum token budget.
+            # The final method in pilot_methods is the V=3 F4 topology.
+            result = generate(
+                runtime,
+                config,
+                method,
+                all_ids[:count],
+                local_views,
+                reference["seeds"][:count],
+                greedy=True,
+                execution=execution,
+                max_new_tokens=config.pilot_tokens,
+            )
+            seconds = result.prefill_seconds + result.decode_seconds
+            item.update(
+                status="passed",
+                seconds=seconds,
+                outputs_per_hour=3600 * count / seconds,
+                token_count=sum(map(len, result.token_ids)),
+                peak_memory_bytes=result.peak_memory_bytes,
+            )
+            eligible.append(item)
+        except (RuntimeError, AssertionError, FloatingPointError) as exc:
+            item.update(status="rejected", error=f"{type(exc).__name__}: {exc}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        report["pilot"].append(item)
+        print(
+            f"Pilot {backend_name}/{execution}/B={requested}/"
+            f"last_position={candidate_policy['last_position_logits']}: {item['status']}",
+            flush=True,
+        )
+        if item["status"] == "rejected":
+            print(item["error"], flush=True)
     if not eligible:
         report.update(status="failed", error="No execution policy passed P0/pilot.")
         atomic_json(root / "audit.json", report)
         raise RuntimeError(report["error"])
     best = max(eligible, key=lambda item: item["outputs_per_hour"])
     report["selected_policy"] = {
-        key: best[key] for key in ("backend", "execution", "batch_images")
+        key: best[key]
+        for key in ("backend", "execution", "batch_images", "last_position_logits")
     }
     if locked_policy is None:
         atomic_json(policy_path, report["selected_policy"])
@@ -453,7 +484,8 @@ def audit_and_pilot(runtime, config, rows, prepared, directory):
     report["pilot_scope"] = (
         "short warmed V=3 captions; real stage throughput and variable-length efficiency reported separately"
     )
-    report["last_position_logits"] = original_last
-    atomic_json(root / "audit.json", report)
+    runtime.backend.last_position_logits = best["last_position_logits"]
     runtime.set_attention(best["backend"])
+    report["last_position_logits"] = best["last_position_logits"]
+    atomic_json(root / "audit.json", report)
     return report

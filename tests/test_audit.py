@@ -149,3 +149,111 @@ def test_snapshot_support_uses_original_native_dtype():
     compare_snapshots(first, second, protocol="HARMONIZED")
     with pytest.raises(AssertionError, match="plausibility support"):
         compare_snapshots(first, second, protocol="LEGACY")
+
+
+def test_failed_head_optimization_uses_checked_full_head_policy(
+    pilot_case, tmp_path, monkeypatch
+):
+    runtime, config, rows, prepared = pilot_case
+    finish = runtime.backend._finish
+
+    def shape_sensitive_finish(output):
+        state = finish(output)
+        if runtime.backend.last_position_logits:
+            # A common offset preserves sampled/greedy decisions but exceeds
+            # the fixed-prefix tolerance. Native-token parity alone misses it.
+            state.logits = state.logits + 1.0
+        return state
+
+    monkeypatch.setattr(runtime.backend, "_finish", shape_sensitive_finish)
+    directory = tmp_path / "audit"
+    report = audit_and_pilot(runtime, config, rows, prepared, directory)
+    assert report["baseline_checks"][0]["last_position_sample_match"]
+    assert report["pilot"][0]["status"] == "rejected"
+    assert "step 0, view ORIG" in report["pilot"][0]["error"]
+    assert report["selected_policy"] == {
+        "backend": "eager",
+        "execution": "serial",
+        "batch_images": 1,
+        "last_position_logits": False,
+    }
+    fallback = report["pilot"][-1]
+    assert fallback["status"] == "passed"
+    assert set(fallback["method_checks"]) == {"E0", "E1", "F4"}
+    assert all(
+        check["max_absolute_logit_error"] == 0
+        for check in fallback["method_checks"].values()
+    )
+    assert runtime.backend.last_position_logits is False
+    # Reconnects must retain the selected head and recheck just that policy.
+    runtime.backend.last_position_logits = True  # fresh loader default
+    second = audit_and_pilot(runtime, config, rows, prepared, directory)
+    assert second["selected_policy"] == report["selected_policy"]
+    assert len(second["pilot"]) == 1
+    assert second["pilot"][0]["last_position_logits"] is False
+
+
+def test_last_position_token_mismatch_rejects_optimization_only(
+    pilot_case, tmp_path, monkeypatch
+):
+    runtime, config, rows, prepared = pilot_case
+    finish = runtime.backend._finish
+
+    def changed_head(output):
+        state = finish(output)
+        if runtime.backend.last_position_logits:
+            state.logits = state.logits.clone()
+            state.logits[:, -1] += 100
+        return state
+
+    monkeypatch.setattr(runtime.backend, "_finish", changed_head)
+    report = audit_and_pilot(runtime, config, rows, prepared, tmp_path / "audit")
+    assert all(check["native_token_match"] for check in report["baseline_checks"])
+    assert not any(
+        check["last_position_sample_match"] for check in report["baseline_checks"]
+    )
+    assert report["selected_policy"]["last_position_logits"] is False
+    assert runtime.backend.last_position_logits is False
+
+
+def test_native_decoder_mismatch_still_blocks(pilot_case, tmp_path, monkeypatch):
+    runtime, config, rows, prepared = pilot_case
+    reference = runtime.reference
+
+    def changed_reference(*args, **kwargs):
+        tokens = reference(*args, **kwargs).clone()
+        tokens[:, 0] = (tokens[:, 0] + 1) % runtime.model.config.vocab_size
+        return tokens
+
+    monkeypatch.setattr(runtime, "reference", changed_reference)
+    directory = tmp_path / "audit"
+    with pytest.raises(AssertionError, match="does not reproduce"):
+        audit_and_pilot(runtime, config, rows, prepared, directory)
+    report = json.loads((directory / "audit.json").read_text())
+    assert report["status"] == "failed"
+    assert report["pilot"] == []
+    assert not (directory / "execution-policy.json").exists()
+
+
+def test_failed_locked_head_is_never_replaced(pilot_case, tmp_path, monkeypatch):
+    runtime, config, rows, prepared = pilot_case
+    directory = tmp_path / "audit"
+    first = audit_and_pilot(runtime, config, rows, prepared, directory)
+    assert first["selected_policy"]["last_position_logits"] is True
+    frozen = (directory / "execution-policy.json").read_bytes()
+    finish = runtime.backend._finish
+
+    def changed_head(output):
+        state = finish(output)
+        if runtime.backend.last_position_logits:
+            state.logits = state.logits.clone()
+            state.logits[:, -1] += 100
+        return state
+
+    monkeypatch.setattr(runtime.backend, "_finish", changed_head)
+    with pytest.raises(RuntimeError, match="No execution policy passed"):
+        audit_and_pilot(runtime, config, rows, prepared, directory)
+    assert (directory / "execution-policy.json").read_bytes() == frozen
+    report = json.loads((directory / "audit.json").read_text())
+    assert len(report["pilot"]) == 1
+    assert "locked last-position head" in report["pilot"][0]["error"]

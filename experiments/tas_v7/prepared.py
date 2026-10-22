@@ -91,8 +91,12 @@ def pixel_key(method, view):
 
 
 @torch.inference_mode()
-def prepare_feature_batch(runtime, prepared, methods, *, chunk_size=8):
-    """Encode each exact visual tensor once; do not cache history-dependent logits."""
+def prepare_feature_batch(runtime, prepared, methods):
+    """Reuse exact tensors with the native single-image vision encoder shape.
+
+    FP16 encoding can depend on batch shape. Keep each encoded view independent
+    of the other images/methods in this minibatch, then batch language decoding.
+    """
     needed = sorted(
         {pixel_key(method, view) for method in methods for view in method.views}
     )
@@ -104,13 +108,9 @@ def prepare_feature_batch(runtime, prepared, methods, *, chunk_size=8):
             if digest not in unique:
                 unique[digest] = pixel
             locations[(name, index)] = digest
-    ids = list(unique)
-    features = {}
-    for start in range(0, len(ids), chunk_size):
-        selected = ids[start : start + chunk_size]
-        output = runtime.features(torch.stack([unique[key] for key in selected]))
-        for key, tensor in zip(selected, output):
-            features[key] = tensor
+    features = {
+        key: runtime.features(pixel.unsqueeze(0))[0] for key, pixel in unique.items()
+    }
     return {
         name: torch.stack(
             [features[locations[(name, index)]] for index in range(len(prepared))]

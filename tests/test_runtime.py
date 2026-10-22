@@ -1,6 +1,7 @@
 """Network-free integration with the real pinned LLaVA/Llama implementation."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -37,6 +38,51 @@ def test_prefill_features_and_last_position_match_original_forward(model):
     advanced = backend.advance(torch.tensor([[5], [7]]), pixels_state)
     assert advanced.length == pixels_state.length + 1
     assert pixels_state.past[0][0].shape[-2] == pixels_state.length
+
+
+def test_fp16_native_clip_features_match_raw_pixels_and_cached_decode(model, tmp_path):
+    from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
+
+    from experiments.tas_v7.prepared import prepare_feature_batch
+    from llava.model.multimodal_encoder.clip_encoder import CLIPVisionTower
+    from tas_runtime.runtime import LlavaRuntime
+
+    vision_dir = tmp_path / "vision"
+    config = CLIPVisionConfig(
+        hidden_size=8, intermediate_size=16, num_hidden_layers=2,
+        num_attention_heads=2, image_size=8, patch_size=2,
+    )
+    CLIPVisionModel(config).save_pretrained(vision_dir)
+    CLIPImageProcessor(size=8, crop_size=8).save_pretrained(vision_dir)
+    model.model.vision_tower = CLIPVisionTower(
+        str(vision_dir), SimpleNamespace(mm_vision_select_layer=-2)
+    )
+    model.model.mm_projector = torch.nn.Linear(8, model.config.hidden_size)
+    model.half()
+    runtime = LlavaRuntime(model, None, None, tmp_path, last_position_logits=False)
+    ids = torch.tensor([[1, 8, -200, 4, 6]])
+    generator = torch.Generator().manual_seed(91)
+    prepared = []
+    for _ in range(2):
+        pixels = torch.rand(3, 8, 8, generator=generator)
+        prepared.append({"pixels": {
+            "ORIG": pixels, "OBJ-H": pixels * 0.4, "FG-U": pixels * 0.8,
+        }})
+    method = method_by_id("F4")
+    features = prepare_feature_batch(runtime, prepared, [method])
+    for index, item in enumerate(prepared):
+        raw = {name: item["pixels"][name][None].half() for name in method.views}
+        cached = {name: features[name][index:index + 1] for name in method.views}
+        expected = forced_prefix_logits(
+            runtime.backend, ids, raw, [3, 4], execution="serial"
+        )
+        actual = forced_prefix_logits(
+            runtime.backend, ids, cached, [3, 4], execution="serial"
+        )
+        for first, second in zip(expected, actual):
+            for name in method.views:
+                assert first[name].dtype == torch.float16
+                assert torch.equal(first[name], second[name])
 
 
 @pytest.mark.parametrize("identifier", ["E0", "E1"])
